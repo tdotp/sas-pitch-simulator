@@ -1,0 +1,59 @@
+import dotenv from "dotenv";
+
+dotenv.config();
+
+function req(name: string, fallback?: string): string {
+  const v = process.env[name] ?? fallback;
+  if (v === undefined || v === "") {
+    // Don't throw at import time — some keys are only needed for certain
+    // routes, and we want the server to boot even while creds are pending.
+    return "";
+  }
+  return v;
+}
+
+export const config = {
+  port: parseInt(process.env.PORT ?? "8080", 10),
+  corsOrigins: (process.env.CORS_ORIGINS ?? "http://localhost:5173")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+
+  elevenlabs: {
+    apiKey: req("ELEVENLABS_API_KEY"),
+    agentId: req("ELEVENLABS_AGENT_ID"),
+    voices: {
+      male: req("ELEVEN_VOICE_MALE"),
+      female: req("ELEVEN_VOICE_FEMALE"),
+      genericA: req("ELEVEN_VOICE_GENERIC_A"),
+      genericB: req("ELEVEN_VOICE_GENERIC_B"),
+    },
+  },
+
+  openrouter: {
+    apiKey: req("OPENROUTER_API_KEY"),
+    model: req("OPENROUTER_MODEL", "anthropic/claude-sonnet-4"),
+    siteUrl: req("OPENROUTER_SITE_URL", "http://localhost:5173"),
+    appName: req("OPENROUTER_APP_NAME", "SAS Pitch Simulator"),
+  },
+
+  firebase: {
+    serviceAccountPath: req("FIREBASE_SERVICE_ACCOUNT_PATH"),
+    projectId: req("FIREBASE_PROJECT_ID"),
+    storageBucket: req("FIREBASE_STORAGE_BUCKET"),
+  },
+
+  persistenceDisabled:
+    (process.env.PERSISTENCE_DISABLED ?? "false").toLowerCase() === "true",
+} as const;
+
+export function assertElevenReady(): string | null {
+  if (!config.elevenlabs.apiKey) return "ELEVENLABS_API_KEY no configurada";
+  if (!config.elevenlabs.agentId) return "ELEVENLABS_AGENT_ID no configurada";
+  return null;
+}
+
+export function assertOpenRouterReady(): string | null {
+  if (!config.openrouter.apiKey) return "OPENROUTER_API_KEY no configurada";
+  return null;
+}
