@@ -1,0 +1,25 @@
+{
+  "name": "SmartPR · Simulador de vocería",
+  "short_name": "Vocería SmartPR",
+  "description": "Simulador responsive para practicar conversaciones ejecutivas y revisar retroalimentación.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#fbf6ef",
+  "theme_color": "#fbf6ef",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "assets/app-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "assets/app-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

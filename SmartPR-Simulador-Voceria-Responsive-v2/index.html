@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#fbf6ef" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="SmartPR · Simulador de vocería" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="format-detection" content="telephone=no" />
+  <title>SmartPR · Simulador de vocería</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="assets/app-icon-192.png" />
+  <link rel="apple-touch-icon" href="assets/app-icon-192.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main id="app" class="app" aria-live="polite">
+    <!-- LOGIN -->
+    <section class="screen screen--login is-active" data-screen="login">
+      <header class="brand-header brand-header--light">
+        <img class="brand-logo brand-logo--desktop" src="assets/SmartPR_Logo.svg" alt="SmartPR" />
+        <img class="brand-logo brand-logo--mobile" src="assets/SmartPR_Logo.svg" alt="SmartPR" />
+      </header>
+
+      <div class="login-panel page-shell">
+        <p class="eyebrow">Acceso privado</p>
+        <h1 class="display-title display-title--login">Simulador<br>de vocería</h1>
+        <p class="lead login-lead">Entrena conversaciones ejecutivas en un entorno privado y recibe retroalimentación al finalizar.</p>
+
+        <form class="login-form" id="login-form">
+          <label class="field">
+            <span class="sr-only">Correo</span>
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 6.5h17v11h-17zM4 7l8 6 8-6"/></svg>
+            <input id="email" type="email" value="user@smartpr.com.co" autocomplete="email" required />
+          </label>
+          <label class="field">
+            <span class="sr-only">Contraseña</span>
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 10V8a5 5 0 0 1 10 0v2M5 10h14v10H5z"/></svg>
+            <input id="password" type="password" value="smartpr" autocomplete="current-password" required />
+            <button type="button" class="field-action" id="toggle-password" aria-label="Mostrar contraseña">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M2.5 12s3.5-5 9.5-5 9.5 5 9.5 5-3.5 5-9.5 5-9.5-5-9.5-5z"/><circle cx="12" cy="12" r="2.5"/></svg>
+            </button>
+          </label>
+          <button class="primary-button primary-button--wide" type="submit">Ingresar</button>
+          <button class="text-button" type="button">¿Olvidaste tu contraseña?</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- SELECTION -->
+    <section class="screen screen--selection" data-screen="selection">
+      <header class="brand-header brand-header--light">
+        <img class="brand-logo brand-logo--desktop" src="assets/SmartPR_Logo.svg" alt="SmartPR" />
+        <img class="brand-logo brand-logo--mobile" src="assets/SmartPR_Logo.svg" alt="SmartPR" />
+      </header>
+
+      <div class="selection-content page-shell">
+        <p class="eyebrow">Sesión de práctica</p>
+        <h1 class="display-title display-title--selection">¿Qué conversación<br>quieres practicar hoy?</h1>
+        <p class="lead">Selecciona un contexto para simular una conversación ejecutiva.</p>
+
+        <div class="scenario-list" role="radiogroup" aria-label="Escenario">
+          <button class="scenario-row is-selected" type="button" data-scenario="general" role="radio" aria-checked="true">
+            <span class="scenario-number">01</span>
+            <span class="scenario-copy">
+              <strong>Conversación general</strong>
+              <small>Practica una presentación ejecutiva sin una compañía específica.</small>
+            </span>
+            <span class="scenario-arrow" aria-hidden="true">›</span>
+          </button>
+          <button class="scenario-row" type="button" data-scenario="davivienda" role="radio" aria-checked="false">
+            <span class="scenario-number">02</span>
+            <span class="scenario-copy">
+              <strong>Davivienda</strong>
+              <small>Enfoque en transformación, riesgo, cliente e innovación.</small>
+            </span>
+            <span class="scenario-arrow" aria-hidden="true">›</span>
+          </button>
+          <button class="scenario-row" type="button" data-scenario="aval" role="radio" aria-checked="false">
+            <span class="scenario-number">03</span>
+            <span class="scenario-copy">
+              <strong>Grupo Aval</strong>
+              <small>Enfoque en escala, eficiencia, rentabilidad e integración.</small>
+            </span>
+            <span class="scenario-arrow" aria-hidden="true">›</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="bottom-action bottom-action--selection">
+        <button class="primary-button selection-continue" type="button" data-go="preparation">Continuar <span>›</span></button>
+      </div>
+    </section>
+
+    <!-- PREPARATION -->
+    <section class="screen screen--preparation" data-screen="preparation">
+      <header class="brand-header brand-header--light">
+        <img class="brand-logo brand-logo--desktop" src="assets/SmartPR_Logo.svg" alt="SmartPR" />
+        <img class="brand-logo brand-logo--mobile" src="assets/SmartPR_Logo.svg" alt="SmartPR" />
+      </header>
+
+      <div class="preparation-content page-shell">
+        <p class="eyebrow">Antes de comenzar</p>
+        <h1 class="display-title display-title--prep">Tienes hasta<br>tres minutos.</h1>
+        <p class="lead prep-lead">Presenta el problema, explica el valor de SAS y cierra con un siguiente paso claro.</p>
+
+        <div class="prep-orb-wrap" aria-hidden="true">
+          <div class="smart-orb smart-orb--light" data-orb-state="idle">
+            <div class="orb-glow"></div>
+            <svg class="orb-svg" viewBox="0 0 1200 1200">
+              <g class="blob blob-1"><path d="M100 600q0-500 500-500t500 500t-500 500T100 600z"/></g>
+              <g class="blob blob-2"><path d="M100 600q0-400 500-500t400 500t-500 500T100 600z"/></g>
+              <g class="blob blob-3"><path d="M100 600q-50-400 500-500t450 550t-500 500T100 600z"/></g>
+              <g class="blob blob-4"><path d="M150 600q0-600 500-500t500 550t-500 500T150 600z"/></g>
+              <g class="blob blob-1 alt"><path d="M100 600q0-500 500-500t500 500t-500 500T100 600z"/></g>
+              <g class="blob blob-2 alt"><path d="M100 600q0-400 500-500t400 500t-500 500T100 600z"/></g>
+            </svg>
+            <div class="orb-glass"></div>
+          </div>
+        </div>
+
+        <div class="session-stats">
+          <div><span>Duración ideal</span><strong>90 <small>segundos</small></strong></div>
+          <div><span>Tiempo máximo</span><strong>3 <small>minutos</small></strong></div>
+          <div><span>Repreguntas</span><strong><small>hasta</small> 2</strong></div>
+        </div>
+
+        <div class="prep-mobile-flow" aria-label="Estructura sugerida">
+          <article>
+            <span class="step-icon">
+              <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 7h18v13H14l-6 5v-5H7z"/><path d="M16 11.5v1.2c0 1.2-2 1.4-2 3.2M14 19h.01"/></svg>
+            </span>
+            <div><small>01</small><strong>Problema</strong><p>Presenta el contexto<br>y el reto clave.</p></div>
+            <span class="step-arrow">›</span>
+          </article>
+          <article>
+            <span class="step-icon">
+              <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M6 16 15 7h11v11l-9 9z"/><path d="M23 4v6M20 7h6"/></svg>
+            </span>
+            <div><small>02</small><strong>Valor</strong><p>Explica cómo SAS<br>genera impacto.</p></div>
+            <span class="step-arrow">›</span>
+          </article>
+          <article>
+            <span class="step-icon">
+              <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 16h21M18 8l8 8-8 8"/></svg>
+            </span>
+            <div><small>03</small><strong>Acción</strong><p>Propón el siguiente<br>paso concreto.</p></div>
+            <span class="step-arrow">›</span>
+          </article>
+        </div>
+      </div>
+
+      <div class="preparation-footer bottom-action">
+        <div class="mic-ready"><span class="status-dot"></span>Micrófono listo</div>
+        <button class="primary-button prep-start" type="button" id="start-session">Comenzar <span>›</span></button>
+      </div>
+    </section>
+
+    <!-- CONVERSATION -->
+    <section class="screen screen--conversation" data-screen="conversation">
+      <header class="conversation-header">
+        <div class="conversation-header--desktop">
+          <img class="brand-logo brand-logo--smart brand-logo--white" src="assets/SmartPR_Logo.svg" alt="SmartPR" />
+          <img class="sas-logo" src="assets/SAS_Logo.svg" alt="SAS" />
+        </div>
+        <div class="conversation-header--mobile">
+          <img class="brand-logo brand-logo--conversation-mobile brand-logo--white" src="assets/SmartPR_Logo.svg" alt="SmartPR" />
+          <img class="sas-logo" src="assets/SAS_Logo.svg" alt="SAS" />
+        </div>
+      </header>
+
+      <div class="conversation-center page-shell">
+        <div class="smart-orb smart-orb--dark" id="conversation-orb" data-orb-state="listening" aria-hidden="true">
+          <div class="orb-glow"></div>
+          <svg class="orb-svg" viewBox="0 0 1200 1200">
+            <g class="blob blob-1"><path d="M100 600q0-500 500-500t500 500t-500 500T100 600z"/></g>
+            <g class="blob blob-2"><path d="M100 600q0-400 500-500t400 500t-500 500T100 600z"/></g>
+            <g class="blob blob-3"><path d="M100 600q-50-400 500-500t450 550t-500 500T100 600z"/></g>
+            <g class="blob blob-4"><path d="M150 600q0-600 500-500t500 550t-500 500T150 600z"/></g>
+            <g class="blob blob-1 alt"><path d="M100 600q0-500 500-500t500 500t-500 500T100 600z"/></g>
+            <g class="blob blob-2 alt"><path d="M100 600q0-400 500-500t400 500t-500 500T100 600z"/></g>
+          </svg>
+          <div class="orb-glass"></div>
+        </div>
+
+        <p class="conversation-state" id="conversation-state">Escuchando</p>
+        <p class="conversation-timer" id="conversation-timer">00:00</p>
+        <p class="conversation-question" id="conversation-question">Cuéntame en pocas palabras: ¿por qué SAS y por qué ahora?</p>
+        <p class="conversation-scenario" id="conversation-scenario">Escenario · Conversación general</p>
+        <button class="ghost-button" type="button" id="end-session">Finalizar sesión</button>
+      </div>
+    </section>
+
+    <!-- PROCESSING -->
+    <section class="screen screen--processing" data-screen="processing">
+      <header class="brand-header brand-header--light">
+        <img class="brand-logo brand-logo--desktop" src="assets/SmartPR_Logo.svg" alt="SmartPR" />
+        <img class="brand-logo brand-logo--mobile" src="assets/SmartPR_Logo.svg" alt="SmartPR" />
+      </header>
+      <div class="processing-content page-shell">
+        <div class="processing-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p class="eyebrow">Análisis en curso</p>
+        <h1 class="display-title display-title--processing">Preparando tu<br>retroalimentación.</h1>
+        <p class="lead">Estamos organizando los hallazgos principales de la sesión.</p>
+      </div>
+    </section>
+
+    <!-- REPORT SUMMARY -->
+    <section class="screen screen--report" data-screen="report">
+      <div class="report-page page-shell">
+        <header class="report-header">
+          <div class="report-brand">
+            <img class="brand-logo brand-logo--desktop" src="assets/SmartPR_Logo.svg" alt="SmartPR" />
+            <img class="brand-logo brand-logo--mobile" src="assets/SmartPR_Logo.svg" alt="SmartPR" />
+            <span class="report-meta">Simulador de vocería</span>
+          </div>
+          <span class="report-meta report-meta--right"><span data-bind="scenario">Conversación general</span> · 18 JUL 2026</span>
+        </header>
+
+        <div class="report-grid">
+          <div class="report-main">
+            <h1>La propuesta fue clara, pero perdió precisión al explicar la integración.</h1>
+            <section class="report-summary">
+              <h2>Resumen</h2>
+              <p>Tu mensaje conectó bien con las prioridades del negocio y demostró dominio del contexto. Lograste mantener un tono ejecutivo y enfocado en valor. Sin embargo, la explicación de cómo se integran los sistemas actuales con la solución propuesta fue poco específica, lo que pudo generar dudas sobre la ejecución. Fortalecer la claridad técnica con ejemplos concretos y cifras clave aumentará la credibilidad y reducirá el riesgo percibido.</p>
+            </section>
+          </div>
+
+          <aside class="metrics-list" aria-label="Métricas">
+            <div><span class="metric-icon">◷</span><strong id="metric-duration">02:14</strong><span>duración</span></div>
+            <div><span class="metric-icon">◴</span><strong>132</strong><span>palabras/minuto</span></div>
+            <div><span class="metric-icon">▥</span><strong>3</strong><span>cifras utilizadas</span></div>
+            <div><span class="metric-icon">⌁</span><strong>1</strong><span>llamado a la acción</span></div>
+          </aside>
+        </div>
+
+        <div class="insight-grid">
+          <article class="insight-card">
+            <span class="insight-icon">☆</span>
+            <div><h3>Fortaleza</h3><p>Enfocaste el mensaje en el impacto para el negocio y mantuviste un tono ejecutivo consistente.</p></div>
+            <span class="insight-arrow">›</span>
+          </article>
+          <article class="insight-card">
+            <span class="insight-icon">↗</span>
+            <div><h3>Oportunidad</h3><p>Profundiza la integración con los sistemas actuales usando ejemplos concretos y términos precisos.</p></div>
+            <span class="insight-arrow">›</span>
+          </article>
+          <article class="insight-card">
+            <span class="insight-icon">⚑</span>
+            <div><h3>Próximo intento</h3><p>Anticipa preguntas sobre integración y respalda tu propuesta con 1–2 cifras adicionales de impacto.</p></div>
+            <span class="insight-arrow">›</span>
+          </article>
+        </div>
+
+        <footer class="report-actions">
+          <button class="text-button text-button--left" type="button" data-go="selection">↻ &nbsp; Repetir escenario</button>
+          <button class="primary-button report-next" type="button" data-go="analysis">Ver análisis completo <span>→</span></button>
+        </footer>
+      </div>
+    </section>
+
+    <!-- FULL ANALYSIS -->
+    <section class="screen screen--analysis" data-screen="analysis">
+      <div class="analysis-page page-shell">
+        <header class="analysis-topline">
+          <div class="analysis-brand">
+            <img class="brand-logo brand-logo--desktop" src="assets/SmartPR_Logo.svg" alt="SmartPR" />
+            <img class="brand-logo brand-logo--mobile" src="assets/SmartPR_Logo.svg" alt="SmartPR" />
+          </div>
+          <span class="report-meta"><span data-bind="scenario">Conversación general</span> · Análisis completo</span>
+        </header>
+        <h1>Análisis de la sesión</h1>
+
+        <div class="analysis-columns">
+          <div class="analysis-sections">
+            <article class="analysis-section">
+              <span class="analysis-icon">
+                <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 7h22v15H13l-7 5v-5H5z"/></svg>
+              </span>
+              <div class="analysis-intro"><h2>Mensaje</h2><p>Claridad, estructura y relevancia del mensaje principal.</p></div>
+              <ul><li>La idea central fue clara, pero se diluyó en detalles adicionales.</li><li>Faltó conectar el impacto con el resultado para el negocio.</li><li>Buen uso de datos para sustentar el mensaje.</li><li>Oportunidad de reforzar el porqué ahora.</li></ul>
+            </article>
+            <article class="analysis-section">
+              <span class="analysis-icon">
+                <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="10" r="5"/><path d="M7 27v-4c0-5 4-8 9-8s9 3 9 8v4z"/></svg>
+              </span>
+              <div class="analysis-intro"><h2>Entrega</h2><p>Presencia, comunicación verbal y no verbal.</p></div>
+              <ul><li>Tono profesional y seguro durante la mayoría de la sesión.</li><li>Ritmo ligeramente acelerado en segmentos clave.</li><li>Buena gestión del lenguaje corporal y contacto visual.</li><li>Pausas estratégicas pueden potenciar el impacto.</li></ul>
+            </article>
+            <article class="analysis-section">
+              <span class="analysis-icon">
+                <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 8h16v11H9l-5 4v-4H4z"/><path d="M13 12h15v10h-4v4l-5-4"/></svg>
+              </span>
+              <div class="analysis-intro"><h2>Conversación</h2><p>Escucha, adaptación y manejo del diálogo.</p></div>
+              <ul><li>Escuchaste activamente y respondiste con relevancia.</li><li>Profundizaste en un tema que no era prioritario para el vocero.</li><li>Oportunidad de anticipar objeciones clave.</li><li>Buen cierre al recapitular beneficios principales.</li></ul>
+            </article>
+          </div>
+
+          <aside class="recommendations">
+            <h2>Recomendaciones</h2>
+            <article><strong>01</strong><div><h3>Define la prioridad antes de presentar la solución</h3><p>Enfoca tu mensaje en el problema más relevante para la audiencia y el impacto que genera tu propuesta.</p></div></article>
+            <article><strong>02</strong><div><h3>Reduce la explicación técnica</h3><p>Simplifica los detalles técnicos y traduce el valor a resultados de negocio fáciles de entender.</p></div></article>
+            <article><strong>03</strong><div><h3>Convierte el cierre en una decisión</h3><p>Finaliza con una pregunta o próximo paso claro que guíe a tu audiencia a la acción.</p></div></article>
+            <button class="analysis-link" type="button">▣ &nbsp; Revisar conversación completa <span>→</span></button>
+          </aside>
+        </div>
+
+        <footer class="analysis-actions">
+          <button class="text-button text-button--left" type="button" data-go="selection">↻ &nbsp; Volver a iniciar</button>
+          <button class="primary-button analysis-continue" type="button" data-go="preparation">Continuar con <span data-bind="scenario">Conversación general</span> <span>→</span></button>
+        </footer>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

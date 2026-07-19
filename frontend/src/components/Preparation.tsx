@@ -50,12 +50,53 @@ export function Preparation({
           </div>
         </div>
 
-        <div className="preparation-footer">
+        <div className="prep-mobile-flow" aria-label="Estructura sugerida">
+          <article>
+            <span className="step-icon">
+              <svg viewBox="0 0 32 32" aria-hidden="true">
+                <path d="M7 7h18v13H14l-6 5v-5H7z" />
+                <path d="M16 11.5v1.2c0 1.2-2 1.4-2 3.2M14 19h.01" />
+              </svg>
+            </span>
+            <div>
+              <small>01</small>
+              <strong>Problema</strong>
+              <p>Presenta el contexto y el reto clave.</p>
+            </div>
+          </article>
+          <article>
+            <span className="step-icon">
+              <svg viewBox="0 0 32 32" aria-hidden="true">
+                <path d="M6 16 15 7h11v11l-9 9z" />
+                <path d="M23 4v6M20 7h6" />
+              </svg>
+            </span>
+            <div>
+              <small>02</small>
+              <strong>Valor</strong>
+              <p>Explica cómo SAS genera impacto.</p>
+            </div>
+          </article>
+          <article>
+            <span className="step-icon">
+              <svg viewBox="0 0 32 32" aria-hidden="true">
+                <path d="M5 16h21M18 8l8 8-8 8" />
+              </svg>
+            </span>
+            <div>
+              <small>03</small>
+              <strong>Acción</strong>
+              <p>Propón el siguiente paso concreto.</p>
+            </div>
+          </article>
+        </div>
+
+        <div className="preparation-footer mobile-bottom-bar">
           <div className="mic-ready">
             <span className={`status-dot ${ready ? "" : "is-waiting"}`} />
             {ready ? "Micrófono y agente listos" : "Preparando la sesión…"}
           </div>
-          <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+          <div className="prep-footer-actions">
             <button className="text-button" type="button" onClick={onBack}>
               ‹ Cambiar escenario
             </button>
@@ -70,6 +111,7 @@ export function Preparation({
           </div>
           {error && <div className="error-text">{error}</div>}
         </div>
+        <div className="mobile-bottom-spacer" />
       </div>
 
       <div className="prep-orb-wrap" aria-hidden="true">

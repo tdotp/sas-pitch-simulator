@@ -78,16 +78,19 @@ export function ScenarioSelect({
             <span />
           )}
 
-          <button
-            className="primary-button"
-            type="button"
-            onClick={() => onContinue(selected, voice)}
-          >
-            Continuar <span>›</span>
-          </button>
+          <div className="mobile-bottom-bar">
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() => onContinue(selected, voice)}
+            >
+              Continuar <span>›</span>
+            </button>
+          </div>
         </div>
 
         {error && <div className="error-text">{error}</div>}
+        <div className="mobile-bottom-spacer" />
       </div>
     </section>
   );
