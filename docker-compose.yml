@@ -1,0 +1,38 @@
+name: sas-pitch-simulator
+
+services:
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./backend/secrets:/app/secrets:ro
+    networks:
+      - sas-net
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - sas-net
+    depends_on:
+      - backend
+
+networks:
+  sas-net:
+    name: sas-pitch-simulator-net
+
+volumes:
+  caddy_data:
+  caddy_config:

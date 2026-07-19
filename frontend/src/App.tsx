@@ -170,7 +170,7 @@ export default function App() {
               retroalimentación.
             </h1>
             <p className="lead">
-              Calculando métricas y generando feedback con Claude Sonnet.
+              Estamos organizando los hallazgos principales de la sesión.
             </p>
           </div>
         </section>
