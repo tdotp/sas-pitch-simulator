@@ -9,7 +9,7 @@ export const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 export const APP_USERS: Array<{ user: string; password: string }> = [
   { user: "gerardo.calambas@smartpr.com.co", password: "memobox1810" },
   { user: "daniel.espana@smartpr.com.co", password: "123456" },
-  { user: "abian.motta@smartpr.com.co", password: "123456" },
+  { user: "fabian.motta@smartpr.com.co", password: "123456" },
 ];
 
 export const TIMER = {
