@@ -1,4 +1,4 @@
-import { API_BASE } from "./config";
+import { API_BASE, API_TOKEN } from "./config";
 import type {
   EndSessionResponse,
   StartSessionResponse,
@@ -10,7 +10,10 @@ import type {
 async function post<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(API_TOKEN ? { "x-app-token": API_TOKEN } : {}),
+    },
     body: JSON.stringify(body),
   });
   if (!res.ok) {

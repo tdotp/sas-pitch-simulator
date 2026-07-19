@@ -3,9 +3,10 @@
 //  - slow: POST /session/end    → metrics + Claude Sonnet evaluation + persist
 // Firebase writes are fire-and-forget; the report is returned immediately.
 
-import { Router, type Request, type Response } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
+import rateLimit from "express-rate-limit";
 import { randomUUID } from "node:crypto";
-import { assertElevenReady, assertOpenRouterReady } from "./config.js";
+import { assertElevenReady, assertOpenRouterReady, config } from "./config.js";
 import type {
   SessionRecord,
   StartSessionRequest,
@@ -38,6 +39,27 @@ router.get("/health", (_req: Request, res: Response) => {
     time: new Date().toISOString(),
   });
 });
+
+// Everything below costs real ElevenLabs/OpenRouter credits per call, so it's
+// gated by a shared token (sent by our own frontend, not a real secret — it
+// ships in the public bundle) plus a per-IP rate limit. Together they stop
+// casual/opportunistic abuse of the bare backend URL without adding any
+// perceptible latency (both checks run before any external API call).
+function requireToken(req: Request, res: Response, next: NextFunction) {
+  if (!config.apiSharedToken) return next(); // not configured -> open (local dev)
+  if (req.header("x-app-token") === config.apiSharedToken) return next();
+  res.status(401).json({ error: "No autorizado" });
+}
+
+const limiter = rateLimit({
+  windowMs: 60_000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Demasiadas solicitudes. Intenta de nuevo en un minuto." },
+});
+
+router.use(requireToken, limiter);
 
 // ── FAST LANE ─────────────────────────────────────────────
 router.post("/session/start", async (req: Request, res: Response) => {

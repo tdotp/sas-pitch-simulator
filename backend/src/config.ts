@@ -45,6 +45,12 @@ export const config = {
 
   persistenceDisabled:
     (process.env.PERSISTENCE_DISABLED ?? "false").toLowerCase() === "true",
+
+  // Shared token the frontend sends on every /api call. This is NOT a real
+  // secret (it ships inside the public JS bundle) — it only raises the bar
+  // above "anyone who finds the bare backend URL", combined with the
+  // rate-limiter below. If unset, the check is skipped (local dev default).
+  apiSharedToken: req("API_SHARED_TOKEN"),
 } as const;
 
 export function assertElevenReady(): string | null {

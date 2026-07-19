@@ -2,6 +2,10 @@
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 
+// Sent as the x-app-token header on every API call — must match the
+// backend's API_SHARED_TOKEN. Not a real secret (see backend/src/routes.ts).
+export const API_TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
+
 // MVP access gate — a frontend-only check, not real authentication.
 // These credentials are visible in the built JS bundle to anyone who opens
 // devtools; this is acceptable for an internal single-team tool but should
