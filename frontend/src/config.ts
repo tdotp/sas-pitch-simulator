@@ -14,6 +14,7 @@ export const APP_USERS: Array<{ user: string; password: string }> = [
   { user: "gerardo.calambas@smartpr.com.co", password: "memobox1810" },
   { user: "daniel.espana@smartpr.com.co", password: "123456" },
   { user: "fabian.motta@smartpr.com.co", password: "123456" },
+  { user: "juan.motta@smartpr.com.co", password: "123456" },
 ];
 
 export const TIMER = {
