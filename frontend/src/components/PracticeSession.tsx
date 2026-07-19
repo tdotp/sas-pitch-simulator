@@ -25,13 +25,20 @@ function fmt(seconds: number): string {
 }
 
 // Timer color tram per the brief: <60 neutral · 60–90 sweet spot · 90–180 over ·
-// last 15s / max red.
+// last 15s / max red. Purely visual pacing cue now — it no longer cuts the
+// session (see the turn-based ending logic below).
 function timerClass(seconds: number): string {
-  if (seconds >= TIMER.maxSeconds - 15) return "is-max";
+  if (seconds >= TIMER.maxSeconds) return "is-max";
   if (seconds >= TIMER.idealSeconds) return "is-over";
   if (seconds >= TIMER.warnSeconds) return "is-ideal";
   return "";
 }
+
+// Silence after Sandra's answer to the 2nd repregunta before we auto-finish.
+const SILENCE_END_MS = 3000;
+// Absolute last-resort guard in case the conversation never naturally wraps
+// (e.g. the agent hangs). Generous on purpose — this is not a pacing rule.
+const ABSOLUTE_MAX_SECONDS = 600;
 
 export function PracticeSession({
   session,
@@ -56,12 +63,19 @@ export function PracticeSession({
   const recordingRef = useRef(false);
   const endedRef = useRef(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Set once the max duration is reached. We don't cut immediately — we wait
-  // for Sandra's current turn to end (mode leaves "listening") so an in-flight
-  // answer is never sliced mid-sentence. `modeRef` mirrors `mode` for use
-  // inside the interval callback without re-subscribing the interval.
-  const hitMaxRef = useRef(false);
-  const modeRef = useRef<string>("listening");
+
+  // Turn tracking: agent speaking-turns go 1=consigna, 2=repregunta 1,
+  // 3=repregunta 2, (4=cierre, which we don't wait for — see finalPhaseRef).
+  const agentTurnCountRef = useRef(0);
+  // Duration of the pitch ONLY (consigna → she stops talking, right before
+  // repregunta 1). This is what actually gets validated against 90s/3min —
+  // NOT the whole conversation, which naturally runs longer once the
+  // back-and-forth starts.
+  const pitchDurationRef = useRef<number | null>(null);
+  // True once repregunta 2 has been asked and Sandra starts answering it.
+  // While true, 3s of silence (no new transcript from her) ends the session.
+  const finalPhaseRef = useRef(false);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const conversation = useConversation({
     onConnect: () => setConnecting(false),
@@ -76,6 +90,12 @@ export function PracticeSession({
         : 0;
       transcriptRef.current.push({ role, text: payload.message, t });
       if (role === "agent") setLatestAgentMsg(payload.message);
+
+      // Any fresh signal from Sandra during the final phase resets the
+      // silence countdown — we only end once she's truly done talking.
+      if (role === "user" && finalPhaseRef.current) {
+        armSilenceTimer();
+      }
     },
     onError: (message: string) => {
       setMicError(message || "Error de conexión con el agente de voz.");
@@ -93,16 +113,27 @@ export function PracticeSession({
     if (endedRef.current) return;
     endedRef.current = true;
     if (intervalRef.current) clearInterval(intervalRef.current);
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     const elapsed = startedAtRef.current
       ? Math.round((Date.now() - startedAtRef.current) / 1000)
       : seconds;
+    // The report's duration check validates the PITCH, not the whole
+    // conversation — fall back to total elapsed only if we somehow never
+    // captured the pitch boundary (e.g. she ended the call early herself).
+    const durationForReport = pitchDurationRef.current ?? elapsed;
     try {
       await conversation.endSession();
     } catch {
       /* ignore */
     }
-    onFinish(transcriptRef.current, elapsed);
+    onFinish(transcriptRef.current, durationForReport);
   }, [conversation, onFinish, seconds]);
+
+  const armSilenceTimer = useCallback(() => {
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    silenceTimerRef.current = setTimeout(() => void finish(), SILENCE_END_MS);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [finish]);
 
   // Start the ElevenLabs conversation once on mount.
   useEffect(() => {
@@ -148,20 +179,33 @@ export function PracticeSession({
     if (connecting) return;
     if (mode === "speaking") {
       agentSpokeRef.current = true;
+      agentTurnCountRef.current += 1;
+      const turn = agentTurnCountRef.current;
+
+      // Turn 2 = repregunta 1 being asked → her pitch just ended, this is
+      // the duration we actually validate (90s ideal / 3min max).
+      if (turn === 2 && pitchDurationRef.current === null) {
+        pitchDurationRef.current = startedAtRef.current
+          ? Math.round((Date.now() - startedAtRef.current) / 1000)
+          : seconds;
+      }
+
+      // Turn ≥4 means the agent is past repregunta 2 (closing message, or
+      // an unexpected extra turn) while we were already in the final
+      // phase — she's done, don't wait out the rest of the silence window.
+      if (turn >= 4 && finalPhaseRef.current) {
+        void finish();
+      }
     } else if (mode === "listening" && agentSpokeRef.current) {
       beginRecording();
+      // She just started answering repregunta 2 (turn 3 was the question).
+      if (agentTurnCountRef.current === 3) {
+        finalPhaseRef.current = true;
+        armSilenceTimer();
+      }
     }
-  }, [mode, connecting, beginRecording]);
-
-  // Graceful cutoff: once time is up, end the session the moment Sandra's
-  // current turn finishes (mode flips back to "speaking", i.e. the agent is
-  // about to reply) — never while she's mid-answer.
-  useEffect(() => {
-    modeRef.current = mode;
-    if (hitMaxRef.current && mode === "speaking") {
-      void finish();
-    }
-  }, [mode, finish]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, connecting, beginRecording, finish]);
 
   // Fallback: if the agent never speaks (edge case), start recording after a
   // short grace period so the exercise is never stuck.
@@ -171,33 +215,22 @@ export function PracticeSession({
     return () => clearTimeout(id);
   }, [connecting, beginRecording]);
 
-  // Pitch timer. At the max duration we don't cut immediately — we set
-  // hitMaxRef and let the mode-change effect above cut right after Sandra's
-  // current turn ends. Safety net: force-finish a bit past the max in case
-  // the agent never yields the floor (e.g. it hangs).
-  const SAFETY_NET_SECONDS = TIMER.maxSeconds + 45;
+  // Visible pacing clock only — does not end the session. Absolute safety
+  // net far beyond any real conversation, in case the turn-based ending
+  // above never fires (e.g. the agent hangs mid-conversation).
   useEffect(() => {
     if (!recording) return;
     intervalRef.current = setInterval(() => {
       setSeconds((prev) => {
         const next = prev + 1;
-        if (next >= TIMER.maxSeconds && !hitMaxRef.current) {
-          hitMaxRef.current = true;
-          // Edge case: time ran out exactly while the agent already holds
-          // the floor — cut right away instead of waiting for a transition
-          // that already happened.
-          if (modeRef.current === "speaking") void finish();
-        }
-        if (next >= SAFETY_NET_SECONDS) {
-          void finish();
-        }
+        if (next >= ABSOLUTE_MAX_SECONDS) void finish();
         return next;
       });
     }, 1000);
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [recording, finish, SAFETY_NET_SECONDS]);
+  }, [recording, finish]);
 
   if (micError) {
     return (
@@ -241,10 +274,6 @@ export function PracticeSession({
     latestAgentMsg ||
     "Escucha la consigna del interlocutor y arranca tu pitch cuando termine.";
 
-  // Freeze the visible clock at the max so it never shows e.g. "3:15" while
-  // we're waiting (internally) for Sandra's current turn to end gracefully.
-  const displaySeconds = Math.min(seconds, TIMER.maxSeconds);
-
   return (
     <section className="screen screen--conversation">
       <header className="conversation-header">
@@ -256,13 +285,13 @@ export function PracticeSession({
         <Orb variant="dark" state={orbState} />
 
         <p className="conversation-state">{stateLabel}</p>
-        <p className={`conversation-timer ${timerClass(displaySeconds)}`}>
-          {fmt(displaySeconds)}
+        <p className={`conversation-timer ${timerClass(seconds)}`}>
+          {fmt(seconds)}
         </p>
         <p className="conversation-question">{caption}</p>
         <p className="conversation-scenario">Escenario · {scenarioLabel}</p>
         <p className="conversation-hint">
-          Ideal 1:30 · Máximo 3:00
+          Ideal 1:30 · Máximo 3:00 para el pitch inicial
         </p>
 
         <div className="conversation-actions">
