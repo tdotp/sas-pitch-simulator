@@ -56,6 +56,12 @@ export function PracticeSession({
   const recordingRef = useRef(false);
   const endedRef = useRef(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Set once the max duration is reached. We don't cut immediately — we wait
+  // for Sandra's current turn to end (mode leaves "listening") so an in-flight
+  // answer is never sliced mid-sentence. `modeRef` mirrors `mode` for use
+  // inside the interval callback without re-subscribing the interval.
+  const hitMaxRef = useRef(false);
+  const modeRef = useRef<string>("listening");
 
   const conversation = useConversation({
     onConnect: () => setConnecting(false),
@@ -147,6 +153,16 @@ export function PracticeSession({
     }
   }, [mode, connecting, beginRecording]);
 
+  // Graceful cutoff: once time is up, end the session the moment Sandra's
+  // current turn finishes (mode flips back to "speaking", i.e. the agent is
+  // about to reply) — never while she's mid-answer.
+  useEffect(() => {
+    modeRef.current = mode;
+    if (hitMaxRef.current && mode === "speaking") {
+      void finish();
+    }
+  }, [mode, finish]);
+
   // Fallback: if the agent never speaks (edge case), start recording after a
   // short grace period so the exercise is never stuck.
   useEffect(() => {
@@ -155,15 +171,25 @@ export function PracticeSession({
     return () => clearTimeout(id);
   }, [connecting, beginRecording]);
 
-  // Pitch timer; auto-cut at the max.
+  // Pitch timer. At the max duration we don't cut immediately — we set
+  // hitMaxRef and let the mode-change effect above cut right after Sandra's
+  // current turn ends. Safety net: force-finish a bit past the max in case
+  // the agent never yields the floor (e.g. it hangs).
+  const SAFETY_NET_SECONDS = TIMER.maxSeconds + 45;
   useEffect(() => {
     if (!recording) return;
     intervalRef.current = setInterval(() => {
       setSeconds((prev) => {
         const next = prev + 1;
-        if (next >= TIMER.maxSeconds) {
+        if (next >= TIMER.maxSeconds && !hitMaxRef.current) {
+          hitMaxRef.current = true;
+          // Edge case: time ran out exactly while the agent already holds
+          // the floor — cut right away instead of waiting for a transition
+          // that already happened.
+          if (modeRef.current === "speaking") void finish();
+        }
+        if (next >= SAFETY_NET_SECONDS) {
           void finish();
-          return TIMER.maxSeconds;
         }
         return next;
       });
@@ -171,7 +197,7 @@ export function PracticeSession({
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [recording, finish]);
+  }, [recording, finish, SAFETY_NET_SECONDS]);
 
   if (micError) {
     return (
@@ -215,6 +241,10 @@ export function PracticeSession({
     latestAgentMsg ||
     "Escucha la consigna del interlocutor y arranca tu pitch cuando termine.";
 
+  // Freeze the visible clock at the max so it never shows e.g. "3:15" while
+  // we're waiting (internally) for Sandra's current turn to end gracefully.
+  const displaySeconds = Math.min(seconds, TIMER.maxSeconds);
+
   return (
     <section className="screen screen--conversation">
       <header className="conversation-header">
@@ -226,8 +256,8 @@ export function PracticeSession({
         <Orb variant="dark" state={orbState} />
 
         <p className="conversation-state">{stateLabel}</p>
-        <p className={`conversation-timer ${timerClass(seconds)}`}>
-          {fmt(seconds)}
+        <p className={`conversation-timer ${timerClass(displaySeconds)}`}>
+          {fmt(displaySeconds)}
         </p>
         <p className="conversation-question">{caption}</p>
         <p className="conversation-scenario">Escenario · {scenarioLabel}</p>

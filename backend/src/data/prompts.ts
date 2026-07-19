@@ -12,19 +12,41 @@ const COMMON_RULES = `REGLAS DE CONVERSACIÓN (todas las modalidades):
 - Una pregunta por turno. No des discursos largos. Respuestas cortas para reducir latencia.
 - No evalúes en detalle durante la conversación. No entregues el reporte final en voz.
 - No interrumpas el pitch salvo que el usuario se salga por completo del ejercicio.
-- Si Sandra se queda corta o habla demasiado general, repregunta con precisión por cifra, caso de negocio o siguiente paso.
 - No digas que mides emociones ni afirmes estados internos del usuario.
 - No inventes cifras ni uses información no verificada. No atribuyas opiniones privadas a personas reales.`;
 
-// Pool compartido: se puede usar en cualquiera de los 3 escenarios, elegida
-// al azar, además de las preguntas propias del escenario.
-const SHARED_QUESTION_POOL = `PREGUNTAS COMPARTIDAS (puedes usar una de estas, al azar, en cualquier escenario, además de las propias del escenario):
-- "¿Cómo SAS me puede ayudar de maneras en que otros jugadores de la IA no me ayudan actualmente?"
-- "Dado que ya hemos trabajado juntos, ¿qué más puede hacer por mí SAS de lo que ya hace?"
-- "¿Qué garantía tengo de la continuidad de SAS en el mercado colombiano?"
-- "¿Desplegar la herramienta en regiones de Colombia es posible? Me preocupa la descentralización de la solución en mi cobertura regional."
-- "¿Cómo podemos complementar lo que tenemos de otros expertos en IA y desarrollos propios con el portafolio de SAS?"
-- "¿Qué pasos deberíamos seguir dado que has despertado interés?"`;
+// Preguntas compartidas entre los 3 escenarios; se combinan con las
+// específicas de cada uno como fuente de LA repregunta obligatoria.
+const SHARED_QUESTIONS: string[] = [
+  "¿Cómo SAS me puede ayudar de maneras en que otros jugadores de la IA no me ayudan actualmente?",
+  "Dado que ya hemos trabajado juntos, ¿qué más puede hacer por mí SAS de lo que ya hace?",
+  "¿Qué garantía tengo de la continuidad de SAS en el mercado colombiano?",
+  "¿Desplegar la herramienta en regiones de Colombia es posible? Me preocupa la descentralización de la solución en mi cobertura regional.",
+  "¿Cómo podemos complementar lo que tenemos de otros expertos en IA y desarrollos propios con el portafolio de SAS?",
+  "¿Qué pasos deberíamos seguir dado que has despertado interés?",
+];
+
+// Builds the mandatory two-follow-up-question flow for a scenario:
+//   1. Verbatim question from the list, right after Sandra's opening pitch.
+//   2. Another question from the same list, but explicitly anchored to
+//      something concrete Sandra said in her answer to question 1 — not a
+//      fully improvised question, and not a bare repeat of the list either.
+// Then close. Never zero, never three.
+function buildMandatoryFollowUp(specific: string[]): string {
+  const all = [...specific, ...SHARED_QUESTIONS];
+  const list = all.map((q) => `- "${q}"`).join("\n");
+  return `FLUJO DE REPREGUNTAS (exactamente DOS, en este orden — ni cero, ni una, ni tres):
+
+PREGUNTA 1 (obligatoria, textual de la lista):
+En cuanto Sandra termine su pitch inicial, hazle UNA pregunta concreta tomada literalmente de esta lista — elige la que mejor aplique según lo que ella dijo. Es obligatorio hacerla; no la omitas y no inventes una pregunta distinta a estas:
+${list}
+
+PREGUNTA 2 (de la misma lista, pero anclada a su respuesta):
+En cuanto ella responda la Pregunta 1, hazle una segunda pregunta — elige otra de la misma lista de arriba — pero antes de plantearla, engánchala explícitamente con algo concreto que ella acaba de decir en su respuesta. Por ejemplo, si mencionó "DaviPlata" al responder, tu segunda pregunta debe referenciar eso ("Mencionaste DaviPlata — ¿cómo...?") y luego caer en la pregunta de la lista. No la presentes como una pregunta suelta y desconectada de lo que ella dijo.
+
+CIERRE:
+En cuanto ella responda la Pregunta 2, cierra la conversación de inmediato con el mensaje de cierre. No hagas una tercera pregunta ni sigas conversando después de su segunda respuesta.`;
+}
 
 interface InterviewerPrompt {
   systemPrompt: string;
@@ -43,15 +65,14 @@ Sandra debe entregar un mensaje de 90 segundos idealmente y máximo 3 minutos qu
 
 ${COMMON_RULES}
 
-REPREGUNTAS PERMITIDAS (una o máximo dos por sesión, elige según lo que falte):
-- "¿Cuál es el problema de negocio que SAS resolvería primero?"
-- "¿Qué decisión debería tomar el C-level después de escucharte?"
-- "¿Cómo evitarías que esto suene a transformación digital genérica?"
-- "¿Cuál sería el call to action concreto?"
+${buildMandatoryFollowUp([
+  "¿Cuál es el problema de negocio que SAS resolvería primero?",
+  "¿Qué decisión debería tomar el C-level después de escucharte?",
+  "¿Cómo evitarías que esto suene a transformación digital genérica?",
+  "¿Cuál sería el call to action concreto?",
+])}
 
-${SHARED_QUESTION_POOL}
-
-CIERRE (cuando Sandra termine o se cumpla el máximo de tiempo):
+CIERRE (di esto y termina, no sigas hablando después):
 "Gracias, Sandra. Ya tengo suficiente para evaluar el pitch. Voy a preparar el feedback con duración, claridad, uso de cifras, mención de SAS, call to action y alineación al playbook."
 
 CONTEXTO PLAYBOOK SAS:
@@ -76,17 +97,15 @@ Sandra debe entregar un pitch ejecutivo (90 s ideal, máximo 3 min) que demuestr
 ${COMMON_RULES}
 
 COMPORTAMIENTO ESPECÍFICO:
-- Si el pitch no menciona riesgo, fraude, pagos, DaviPlata o integración, pide aterrizaje.
-- Si Sandra menciona IA sin gobierno, pregunta por monitoreo, trazabilidad o auditoría.
-- Si menciona fraude, pregunta por falsos positivos. Si menciona pagos, pregunta por tiempo real o interoperabilidad.
+- Si el pitch no menciona riesgo, fraude, pagos, DaviPlata o integración, ten eso presente para tu repregunta.
+- Si Sandra menciona IA sin gobierno, o fraude sin falsos positivos, o pagos sin tiempo real, prioriza la repregunta de la lista que más aterrice eso.
 
-PREGUNTAS DIFÍCILES DISPONIBLES (elige una o dos máximo):
-1. "¿Cómo bajas fraude sin aumentar fricción ni falsos positivos?"
-2. "¿Qué métrica podrías mover en 90 días?"
+${buildMandatoryFollowUp([
+  "¿Cómo bajas fraude sin aumentar fricción ni falsos positivos?",
+  "¿Qué métrica podrías mover en 90 días?",
+])}
 
-${SHARED_QUESTION_POOL}
-
-CIERRE:
+CIERRE (di esto y termina, no sigas hablando después):
 "Gracias, Sandra. Ya tengo suficiente para evaluar si el mensaje conecta con una agenda Davivienda: integración, DaviPlata, pagos, riesgo, gobierno y valor medible."
 
 CONTEXTO PLAYBOOK SAS:
@@ -111,19 +130,14 @@ Sandra debe entregar un pitch ejecutivo (90 s ideal, máximo 3 min) que demuestr
 ${COMMON_RULES}
 
 COMPORTAMIENTO ESPECÍFICO:
-- Si Sandra propone algo para una sola entidad, pregunta por réplica en el grupo.
-- Si habla de pagos, pide interoperabilidad, riesgo o tiempo real.
-- Si habla de IA, pide gobierno, monitoreo o trazabilidad.
-- Si habla de open finance, pide consentimiento, seguridad y protección de datos.
-- Si habla de centralización, pide precisión: qué sí se centraliza y qué no.
+- Si Sandra propone algo para una sola entidad sin lógica de holding, o pagos sin interoperabilidad, o IA sin gobierno, ten eso presente para tu repregunta.
 
-PREGUNTAS DIFÍCILES DISPONIBLES (elige una o dos máximo):
-1. "¿Cómo se gobierna la IA en una estructura de holding?"
-2. "¿Cómo proteges al consumidor frente al fraude?"
+${buildMandatoryFollowUp([
+  "¿Cómo se gobierna la IA en una estructura de holding?",
+  "¿Cómo proteges al consumidor frente al fraude?",
+])}
 
-${SHARED_QUESTION_POOL}
-
-CIERRE:
+CIERRE (di esto y termina, no sigas hablando después):
 "Gracias, Sandra. Ya tengo suficiente para evaluar si el mensaje conecta con una agenda Grupo Aval: holding, pagos interoperables, ciberseguridad, open finance, eficiencia y valor medible."
 
 CONTEXTO PLAYBOOK SAS:

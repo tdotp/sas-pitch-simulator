@@ -1,15 +1,20 @@
 import { useState } from "react";
-import { APP_USER, APP_PASSWORD } from "../config";
+import { APP_USERS } from "../config";
 
 export function Login({ onLogin }: { onLogin: () => void }) {
-  const [user, setUser] = useState(APP_USER);
-  const [pass, setPass] = useState(APP_PASSWORD);
+  const [user, setUser] = useState("");
+  const [pass, setPass] = useState("");
   const [showPass, setShowPass] = useState(false);
   const [err, setErr] = useState("");
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (user.trim() === APP_USER && pass === APP_PASSWORD) {
+    const match = APP_USERS.some(
+      (u) =>
+        u.user.trim().toLowerCase() === user.trim().toLowerCase() &&
+        u.password === pass
+    );
+    if (match) {
       onLogin();
     } else {
       setErr("Usuario o contraseña incorrectos.");
@@ -44,7 +49,9 @@ export function Login({ onLogin }: { onLogin: () => void }) {
             <input
               type="text"
               value={user}
+              placeholder="Correo"
               autoComplete="username"
+              autoFocus
               onChange={(e) => setUser(e.target.value)}
             />
           </label>
@@ -56,6 +63,7 @@ export function Login({ onLogin }: { onLogin: () => void }) {
             <input
               type={showPass ? "text" : "password"}
               value={pass}
+              placeholder="Contraseña"
               autoComplete="current-password"
               onChange={(e) => setPass(e.target.value)}
             />
