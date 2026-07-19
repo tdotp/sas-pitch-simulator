@@ -15,6 +15,7 @@ build/
 **/serviceAccount*.json
 **/firebase-admin*.json
 *-credentials.json
+ACCESOS.md
 
 # Logs
 *.log
