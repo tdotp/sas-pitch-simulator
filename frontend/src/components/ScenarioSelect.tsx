@@ -3,12 +3,10 @@ import { TARGETS, type TargetId } from "../config";
 import type { VoiceGender } from "../types";
 
 export function ScenarioSelect({
-  onStart,
-  starting,
+  onContinue,
   error,
 }: {
-  onStart: (target: TargetId, voice: VoiceGender) => void;
-  starting: boolean;
+  onContinue: (target: TargetId, voice: VoiceGender) => void;
   error?: string;
 }) {
   const [selected, setSelected] = useState<TargetId>("generic");
@@ -17,71 +15,80 @@ export function ScenarioSelect({
   const current = TARGETS.find((t) => t.id === selected)!;
 
   return (
-    <div className="card">
-      <h1>Elige tu escenario de práctica</h1>
-      <p className="muted">
-        Vas a entregar un pitch ejecutivo de 90 segundos (ideal) a máximo 3
-        minutos. Incluye una cifra, menciona SAS y cierra con un siguiente paso.
-      </p>
+    <section className="screen screen--selection">
+      <header className="brand-header">
+        <img className="brand-logo" src="/assets/SmartPR_Logo.svg" alt="SmartPR" />
+      </header>
 
-      <div className="scenario-grid">
-        {TARGETS.map((t) => (
+      <div className="selection-content">
+        <p className="eyebrow">Sesión de práctica</p>
+        <h1 className="display-title display-title--selection">
+          ¿Qué conversación
+          <br />
+          quieres practicar hoy?
+        </h1>
+        <p className="lead">
+          Selecciona un contexto para simular una conversación ejecutiva
+        </p>
+
+        <div className="scenario-list" role="radiogroup" aria-label="Escenario">
+          {TARGETS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="radio"
+              aria-checked={selected === t.id}
+              className={`scenario-row ${selected === t.id ? "is-selected" : ""}`}
+              onClick={() => setSelected(t.id)}
+            >
+              <span className="scenario-number">{t.number}</span>
+              <span className="scenario-copy">
+                <strong>{t.label}</strong>
+                <small>{t.subtitle}</small>
+              </span>
+              <span className="scenario-arrow" aria-hidden="true">
+                ›
+              </span>
+            </button>
+          ))}
+        </div>
+
+        <div className="selection-footer">
+          {current.allowsVoiceChoice ? (
+            <div className="voice-picker">
+              <span className="voice-label">Voz del interlocutor</span>
+              {(
+                [
+                  ["random", "Aleatoria"],
+                  ["male", "Hombre"],
+                  ["female", "Mujer"],
+                ] as [VoiceGender, string][]
+              ).map(([v, label]) => (
+                <button
+                  key={v}
+                  type="button"
+                  className={`chip ${voice === v ? "active" : ""}`}
+                  onClick={() => setVoice(v)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <span />
+          )}
+
           <button
-            key={t.id}
-            className={`scenario ${selected === t.id ? "selected" : ""}`}
-            style={
-              { "--accent": t.accent } as React.CSSProperties & {
-                "--accent": string;
-              }
-            }
-            onClick={() => setSelected(t.id)}
+            className="primary-button"
             type="button"
+            onClick={() => onContinue(selected, voice)}
           >
-            <span className="dot" />
-            <h3>{t.label}</h3>
-            <p>{t.subtitle}</p>
+            Continuar <span>›</span>
           </button>
-        ))}
-      </div>
+        </div>
 
-      {current.allowsVoiceChoice && (
-        <>
-          <h2>Voz del interlocutor</h2>
-          <div className="voice-row">
-            {(
-              [
-                ["random", "Aleatoria"],
-                ["male", "Hombre"],
-                ["female", "Mujer"],
-              ] as [VoiceGender, string][]
-            ).map(([v, label]) => (
-              <button
-                key={v}
-                type="button"
-                className={`chip ${voice === v ? "active" : ""}`}
-                onClick={() => setVoice(v)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-
-      <div className="actions">
-        <button
-          className="btn btn-primary"
-          style={{ width: "auto", paddingInline: 32 }}
-          disabled={starting}
-          onClick={() => onStart(selected, voice)}
-        >
-          {starting ? "Conectando…" : "Iniciar práctica"}
-        </button>
-        <span className="muted" style={{ fontSize: 13 }}>
-          Necesitas permitir el micrófono.
-        </span>
+        {error && <div className="error-text">{error}</div>}
       </div>
-      {error && <div className="error">{error}</div>}
-    </div>
+    </section>
   );
 }

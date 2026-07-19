@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Login } from "./components/Login";
 import { ScenarioSelect } from "./components/ScenarioSelect";
+import { Preparation } from "./components/Preparation";
 import { PracticeSession } from "./components/PracticeSession";
 import { Report } from "./components/Report";
+import { Analysis } from "./components/Analysis";
 import { startSession, endSession, health } from "./api";
 import { TARGETS, type TargetId } from "./config";
 import type {
@@ -13,13 +15,25 @@ import type {
   VoiceGender,
 } from "./types";
 
-type Stage = "login" | "select" | "session" | "evaluating" | "report" | "error";
+type Stage =
+  | "login"
+  | "select"
+  | "preparation"
+  | "session"
+  | "evaluating"
+  | "report"
+  | "analysis"
+  | "error";
+
+function labelFor(target: TargetId): string {
+  return TARGETS.find((t) => t.id === target)?.label ?? target;
+}
 
 export default function App() {
   const [stage, setStage] = useState<Stage>("login");
   const [session, setSession] = useState<StartSessionResponse | null>(null);
   const [starting, setStarting] = useState(false);
-  const [startError, setStartError] = useState("");
+  const [prepError, setPrepError] = useState("");
   const [evalError, setEvalError] = useState("");
   const [result, setResult] = useState<{
     evaluation: EvaluationResult;
@@ -30,6 +44,7 @@ export default function App() {
   const [lastVoice, setLastVoice] = useState<VoiceGender>("random");
   const [envWarning, setEnvWarning] = useState("");
 
+  // Health check when landing on the selection screen.
   useEffect(() => {
     if (stage !== "select") return;
     health()
@@ -42,33 +57,37 @@ export default function App() {
             .filter(Boolean)
             .join(" y ");
           setEnvWarning(
-            `Faltan llaves de ${missing} en el backend. La práctica no funcionará hasta configurarlas en backend/.env.`
+            `Faltan llaves de ${missing} en el backend (backend/.env).`
           );
         } else {
           setEnvWarning("");
         }
       })
-      .catch(() => setEnvWarning("No se pudo contactar el backend (¿está corriendo en :8080?)."));
+      .catch(() =>
+        setEnvWarning("No se pudo contactar el backend (¿corre en :8080?).")
+      );
   }, [stage]);
 
-  async function handleStart(target: TargetId, voice: VoiceGender) {
-    setStarting(true);
-    setStartError("");
-    setLastTarget(target);
-    setLastVoice(voice);
-    try {
-      const s = await startSession({
-        target_mode: target,
-        voice_gender: voice,
-      });
-      setSession(s);
-      setStage("session");
-    } catch (err) {
-      setStartError((err as Error).message);
-    } finally {
-      setStarting(false);
-    }
-  }
+  // Go to preparation and prefetch a fresh signed URL for the scenario.
+  const prepare = useCallback(
+    async (target: TargetId, voice: VoiceGender) => {
+      setLastTarget(target);
+      setLastVoice(voice);
+      setSession(null);
+      setPrepError("");
+      setStarting(true);
+      setStage("preparation");
+      try {
+        const s = await startSession({ target_mode: target, voice_gender: voice });
+        setSession(s);
+      } catch (err) {
+        setPrepError((err as Error).message);
+      } finally {
+        setStarting(false);
+      }
+    },
+    []
+  );
 
   async function handleFinish(
     transcript: TranscriptTurn[],
@@ -84,13 +103,10 @@ export default function App() {
         transcript,
         duration_seconds: durationSeconds,
       });
-      const label =
-        TARGETS.find((t) => t.id === session.target_mode)?.label ??
-        session.target_mode;
       setResult({
         evaluation: res.evaluation,
         metrics: res.metrics,
-        targetLabel: label,
+        targetLabel: labelFor(session.target_mode),
       });
       setStage("report");
     } catch (err) {
@@ -99,91 +115,113 @@ export default function App() {
     }
   }
 
-  function reset() {
+  function toSelect() {
     setSession(null);
     setResult(null);
     setStage("select");
   }
 
-  if (stage === "login") {
-    return <Login onLogin={() => setStage("select")} />;
-  }
+  switch (stage) {
+    case "login":
+      return <Login onLogin={() => setStage("select")} />;
 
-  return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <span className="logo">SAS</span>
-          <div>
-            Simulador de Vocería C-level
-            <br />
-            <small>Entrenamiento de pitch ejecutivo · Sandra Hernández</small>
-          </div>
-        </div>
-        <button onClick={() => setStage("login")}>Salir</button>
-      </header>
+    case "select":
+      return (
+        <>
+          {envWarning && <div className="env-banner">⚠️ {envWarning}</div>}
+          <ScenarioSelect onContinue={prepare} />
+        </>
+      );
 
-      <main className="container">
-        {envWarning && stage === "select" && (
-          <div className="banner">⚠️ {envWarning}</div>
-        )}
+    case "preparation":
+      return (
+        <Preparation
+          ready={!!session}
+          starting={starting}
+          error={prepError}
+          onStart={() => setStage("session")}
+          onBack={toSelect}
+        />
+      );
 
-        {stage === "select" && (
-          <ScenarioSelect
-            onStart={handleStart}
-            starting={starting}
-            error={startError}
-          />
-        )}
+    case "session":
+      return session ? (
+        <PracticeSession
+          session={session}
+          scenarioLabel={labelFor(session.target_mode)}
+          onFinish={handleFinish}
+          onCancel={toSelect}
+        />
+      ) : null;
 
-        {stage === "session" && session && (
-          <PracticeSession
-            session={session}
-            onFinish={handleFinish}
-            onCancel={reset}
-          />
-        )}
-
-        {stage === "evaluating" && (
-          <div className="card center">
-            <h1>Evaluando tu pitch…</h1>
-            <div className="spinner" />
-            <p className="muted">
-              Calculando métricas y generando feedback con Claude Sonnet. Toma
-              unos segundos.
+    case "evaluating":
+      return (
+        <section className="screen screen--processing">
+          <div className="processing-content">
+            <div className="processing-mark" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </div>
+            <p className="eyebrow">Análisis en curso</p>
+            <h1 className="display-title display-title--processing">
+              Preparando tu
+              <br />
+              retroalimentación.
+            </h1>
+            <p className="lead">
+              Calculando métricas y generando feedback con Claude Sonnet.
             </p>
           </div>
-        )}
+        </section>
+      );
 
-        {stage === "report" && result && (
-          <Report
-            evaluation={result.evaluation}
-            metrics={result.metrics}
-            targetLabel={result.targetLabel}
-            onRetry={() => handleStart(lastTarget, lastVoice)}
-            onHome={reset}
-          />
-        )}
+    case "report":
+      return result ? (
+        <Report
+          evaluation={result.evaluation}
+          metrics={result.metrics}
+          targetLabel={result.targetLabel}
+          onRetry={() => prepare(lastTarget, lastVoice)}
+          onAnalysis={() => setStage("analysis")}
+        />
+      ) : null;
 
-        {stage === "error" && (
-          <div className="card center">
-            <h1>No pudimos generar el reporte</h1>
-            <p className="error">{evalError}</p>
-            <div className="actions" style={{ justifyContent: "center" }}>
+    case "analysis":
+      return result ? (
+        <Analysis
+          evaluation={result.evaluation}
+          metrics={result.metrics}
+          targetLabel={result.targetLabel}
+          onRestart={toSelect}
+          onContinue={() => prepare(lastTarget, lastVoice)}
+        />
+      ) : null;
+
+    case "error":
+      return (
+        <section className="screen screen--processing">
+          <div className="processing-content">
+            <h1 className="display-title display-title--processing">
+              No pudimos generar el reporte
+            </h1>
+            <p className="processing-error">{evalError}</p>
+            <div style={{ display: "flex", gap: 16, marginTop: 24 }}>
               <button
-                className="btn btn-primary"
-                style={{ width: "auto", paddingInline: 24 }}
-                onClick={() => handleStart(lastTarget, lastVoice)}
+                className="primary-button"
+                onClick={() => prepare(lastTarget, lastVoice)}
               >
                 Reintentar práctica
               </button>
-              <button className="btn btn-ghost" onClick={reset}>
+              <button className="text-button" onClick={toSelect}>
                 Volver al inicio
               </button>
             </div>
           </div>
-        )}
-      </main>
-    </div>
-  );
+        </section>
+      );
+
+    default:
+      return null;
+  }
 }

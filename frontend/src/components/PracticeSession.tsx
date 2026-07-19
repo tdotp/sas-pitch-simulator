@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useConversation } from "@elevenlabs/react";
 import { TIMER } from "../config";
 import type { StartSessionResponse, TranscriptTurn } from "../types";
-import { Timer } from "./Timer";
+import { Orb, type OrbState } from "./Orb";
 
 // Map backend (snake_case, REST) overrides to the SDK's camelCase shape.
 function toSdkOverrides(o: StartSessionResponse["overrides"]) {
@@ -16,29 +16,49 @@ function toSdkOverrides(o: StartSessionResponse["overrides"]) {
   };
 }
 
+function fmt(seconds: number): string {
+  const m = Math.floor(seconds / 60)
+    .toString()
+    .padStart(2, "0");
+  const s = (seconds % 60).toString().padStart(2, "0");
+  return `${m}:${s}`;
+}
+
+// Timer color tram per the brief: <60 neutral · 60–90 sweet spot · 90–180 over ·
+// last 15s / max red.
+function timerClass(seconds: number): string {
+  if (seconds >= TIMER.maxSeconds - 15) return "is-max";
+  if (seconds >= TIMER.idealSeconds) return "is-over";
+  if (seconds >= TIMER.warnSeconds) return "is-ideal";
+  return "";
+}
+
 export function PracticeSession({
   session,
+  scenarioLabel,
   onFinish,
   onCancel,
 }: {
   session: StartSessionResponse;
+  scenarioLabel: string;
   onFinish: (transcript: TranscriptTurn[], durationSeconds: number) => void;
   onCancel: () => void;
 }) {
   const [seconds, setSeconds] = useState(0);
   const [connecting, setConnecting] = useState(true);
+  const [recording, setRecording] = useState(false);
   const [micError, setMicError] = useState("");
+  const [latestAgentMsg, setLatestAgentMsg] = useState("");
+
   const transcriptRef = useRef<TranscriptTurn[]>([]);
-  const [, forceRender] = useState(0);
   const startedAtRef = useRef<number>(0);
+  const agentSpokeRef = useRef(false);
+  const recordingRef = useRef(false);
   const endedRef = useRef(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const conversation = useConversation({
-    onConnect: () => {
-      setConnecting(false);
-      startedAtRef.current = Date.now();
-    },
+    onConnect: () => setConnecting(false),
     onDisconnect: () => {
       /* handled explicitly in finish() */
     },
@@ -49,13 +69,19 @@ export function PracticeSession({
         ? Math.round((Date.now() - startedAtRef.current) / 1000)
         : 0;
       transcriptRef.current.push({ role, text: payload.message, t });
-      forceRender((n) => n + 1);
+      if (role === "agent") setLatestAgentMsg(payload.message);
     },
     onError: (message: string) => {
       setMicError(message || "Error de conexión con el agente de voz.");
       setConnecting(false);
     },
   });
+
+  const isSpeaking = conversation.isSpeaking;
+  // `mode` is a per-turn signal ("speaking" while the agent holds the floor,
+  // "listening" once it yields). It's far more stable than `isSpeaking`, which
+  // flickers on TTS micro-gaps between sentences.
+  const mode = conversation.mode;
 
   const finish = useCallback(async () => {
     if (endedRef.current) return;
@@ -103,9 +129,35 @@ export function PracticeSession({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Timer tick; auto-cut at the max.
+  // Speak-first-then-record: the agent delivers the consigna; the pitch timer
+  // starts only once the agent FINISHES its first utterance.
+  const beginRecording = useCallback(() => {
+    if (recordingRef.current) return;
+    recordingRef.current = true;
+    startedAtRef.current = Date.now();
+    setRecording(true);
+  }, []);
+
   useEffect(() => {
     if (connecting) return;
+    if (mode === "speaking") {
+      agentSpokeRef.current = true;
+    } else if (mode === "listening" && agentSpokeRef.current) {
+      beginRecording();
+    }
+  }, [mode, connecting, beginRecording]);
+
+  // Fallback: if the agent never speaks (edge case), start recording after a
+  // short grace period so the exercise is never stuck.
+  useEffect(() => {
+    if (connecting) return;
+    const id = setTimeout(() => beginRecording(), 9000);
+    return () => clearTimeout(id);
+  }, [connecting, beginRecording]);
+
+  // Pitch timer; auto-cut at the max.
+  useEffect(() => {
+    if (!recording) return;
     intervalRef.current = setInterval(() => {
       setSeconds((prev) => {
         const next = prev + 1;
@@ -119,72 +171,83 @@ export function PracticeSession({
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [connecting, finish]);
-
-  const isSpeaking = conversation.isSpeaking;
-  const turns = transcriptRef.current;
+  }, [recording, finish]);
 
   if (micError) {
     return (
-      <div className="card center">
-        <h1>No pudimos iniciar la sesión</h1>
-        <p className="error">{micError}</p>
-        <p className="muted">
-          Revisa el permiso de micrófono y que el backend tenga configuradas las
-          llaves de ElevenLabs.
-        </p>
-        <button className="btn btn-ghost" onClick={onCancel}>
-          Volver
-        </button>
-      </div>
+      <section className="screen screen--processing">
+        <div className="processing-content">
+          <h1 className="display-title display-title--processing">
+            No pudimos iniciar
+          </h1>
+          <p className="processing-error">{micError}</p>
+          <p className="lead">
+            Revisa el permiso de micrófono y que el backend tenga las llaves de
+            ElevenLabs.
+          </p>
+          <button
+            className="primary-button"
+            style={{ marginTop: 24 }}
+            onClick={onCancel}
+          >
+            Volver
+          </button>
+        </div>
+      </section>
     );
   }
 
+  // Orb + state label.
+  let orbState: OrbState = "listening";
+  let stateLabel = "Escuchando";
+  if (connecting) {
+    orbState = "thinking";
+    stateLabel = "Conectando…";
+  } else if (isSpeaking) {
+    orbState = "speaking";
+    stateLabel = "Interlocutor hablando";
+  } else if (!recording) {
+    orbState = "thinking";
+    stateLabel = "Preparando…";
+  }
+
+  const caption =
+    latestAgentMsg ||
+    "Escucha la consigna del interlocutor y arranca tu pitch cuando termine.";
+
   return (
-    <div className="card">
-      <div className="center" style={{ marginBottom: 8 }}>
-        <span
-          className={`status-pill ${
-            connecting ? "status-connecting" : "status-live"
-          }`}
-        >
-          {connecting ? "Conectando con el interlocutor…" : "En vivo"}
-        </span>
-      </div>
+    <section className="screen screen--conversation">
+      <header className="conversation-header">
+        <img className="brand-logo" src="/assets/SmartPR_Logo.svg" alt="SmartPR" />
+        <img className="sas-logo" src="/assets/SAS_Logo.svg" alt="SAS" />
+      </header>
 
-      <div className="session-stage">
-        <div className={`orb ${isSpeaking ? "speaking" : ""}`} />
-        <Timer seconds={seconds} />
+      <div className="conversation-center">
+        <Orb variant="dark" state={orbState} />
 
-        <div className="actions" style={{ justifyContent: "center" }}>
+        <p className="conversation-state">{stateLabel}</p>
+        <p className={`conversation-timer ${timerClass(seconds)}`}>
+          {fmt(seconds)}
+        </p>
+        <p className="conversation-question">{caption}</p>
+        <p className="conversation-scenario">Escenario · {scenarioLabel}</p>
+        <p className="conversation-hint">
+          Ideal 1:30 · Máximo 3:00
+        </p>
+
+        <div className="conversation-actions">
           <button
-            className="btn btn-danger"
+            className="ghost-button is-primary"
             onClick={() => void finish()}
             disabled={connecting}
           >
             Finalizar y evaluar
           </button>
-          <button className="btn btn-ghost" onClick={onCancel}>
+          <button className="ghost-button" onClick={onCancel}>
             Cancelar
           </button>
         </div>
-
-        {turns.length > 0 && (
-          <div className="transcript">
-            {turns.map((turn, i) => (
-              <div key={i} className={`bubble ${turn.role}`}>
-                {turn.text}
-              </div>
-            ))}
-          </div>
-        )}
-        {turns.length === 0 && !connecting && (
-          <p className="muted center" style={{ marginTop: 16 }}>
-            El interlocutor te dará la consigna. Cuando termine, empieza tu
-            pitch.
-          </p>
-        )}
       </div>
-    </div>
+    </section>
   );
 }

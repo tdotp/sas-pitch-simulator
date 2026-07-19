@@ -16,6 +16,16 @@ const COMMON_RULES = `REGLAS DE CONVERSACIÓN (todas las modalidades):
 - No digas que mides emociones ni afirmes estados internos del usuario.
 - No inventes cifras ni uses información no verificada. No atribuyas opiniones privadas a personas reales.`;
 
+// Pool compartido: se puede usar en cualquiera de los 3 escenarios, elegida
+// al azar, además de las preguntas propias del escenario.
+const SHARED_QUESTION_POOL = `PREGUNTAS COMPARTIDAS (puedes usar una de estas, al azar, en cualquier escenario, además de las propias del escenario):
+- "¿Cómo SAS me puede ayudar de maneras en que otros jugadores de la IA no me ayudan actualmente?"
+- "Dado que ya hemos trabajado juntos, ¿qué más puede hacer por mí SAS de lo que ya hace?"
+- "¿Qué garantía tengo de la continuidad de SAS en el mercado colombiano?"
+- "¿Desplegar la herramienta en regiones de Colombia es posible? Me preocupa la descentralización de la solución en mi cobertura regional."
+- "¿Cómo podemos complementar lo que tenemos de otros expertos en IA y desarrollos propios con el portafolio de SAS?"
+- "¿Qué pasos deberíamos seguir dado que has despertado interés?"`;
+
 interface InterviewerPrompt {
   systemPrompt: string;
   firstMessage: string;
@@ -34,12 +44,12 @@ Sandra debe entregar un mensaje de 90 segundos idealmente y máximo 3 minutos qu
 ${COMMON_RULES}
 
 REPREGUNTAS PERMITIDAS (una o máximo dos por sesión, elige según lo que falte):
-- "¿Cuál sería la cifra concreta que usarías para respaldar ese mensaje?"
 - "¿Cuál es el problema de negocio que SAS resolvería primero?"
 - "¿Qué decisión debería tomar el C-level después de escucharte?"
 - "¿Cómo evitarías que esto suene a transformación digital genérica?"
 - "¿Cuál sería el call to action concreto?"
-- "¿Qué riesgo o fricción estás ayudando a reducir?"
+
+${SHARED_QUESTION_POOL}
 
 CIERRE (cuando Sandra termine o se cumpla el máximo de tiempo):
 "Gracias, Sandra. Ya tengo suficiente para evaluar el pitch. Voy a preparar el feedback con duración, claridad, uso de cifras, mención de SAS, call to action y alineación al playbook."
@@ -71,13 +81,10 @@ COMPORTAMIENTO ESPECÍFICO:
 - Si menciona fraude, pregunta por falsos positivos. Si menciona pagos, pregunta por tiempo real o interoperabilidad.
 
 PREGUNTAS DIFÍCILES DISPONIBLES (elige una o dos máximo):
-1. "¿Qué caso resolverías primero: DaviPlata, Bre-B, ePayco o riesgo de crédito?"
-2. "¿Cómo bajas fraude sin aumentar fricción ni falsos positivos?"
-3. "¿Qué métrica podrías mover en 90 días?"
-4. "¿Cómo se gobiernan modelos entre Colombia y Centroamérica?"
-5. "¿Por qué SAS y no un desarrollo interno o un hyperscaler?"
-6. "¿Qué queda en negocio, qué en riesgo y qué en tecnología?"
-7. "¿Qué no harías en una primera fase?"
+1. "¿Cómo bajas fraude sin aumentar fricción ni falsos positivos?"
+2. "¿Qué métrica podrías mover en 90 días?"
+
+${SHARED_QUESTION_POOL}
 
 CIERRE:
 "Gracias, Sandra. Ya tengo suficiente para evaluar si el mensaje conecta con una agenda Davivienda: integración, DaviPlata, pagos, riesgo, gobierno y valor medible."
@@ -111,14 +118,10 @@ COMPORTAMIENTO ESPECÍFICO:
 - Si habla de centralización, pide precisión: qué sí se centraliza y qué no.
 
 PREGUNTAS DIFÍCILES DISPONIBLES (elige una o dos máximo):
-1. "¿Esto sirve solo para una entidad o para el holding?"
-2. "¿Qué capacidad corporativa construiría este caso?"
-3. "¿Cómo se conecta con GOU Payments y Bre-B?"
-4. "¿Qué pérdida o costo operativo reduce?"
-5. "¿Qué parte centralizarías y qué dejarías distribuida?"
-6. "¿Cómo se gobierna la IA en una estructura de holding?"
-7. "¿Cómo proteges al consumidor frente al fraude?"
-8. "¿Qué no harías en la fase uno?"
+1. "¿Cómo se gobierna la IA en una estructura de holding?"
+2. "¿Cómo proteges al consumidor frente al fraude?"
+
+${SHARED_QUESTION_POOL}
 
 CIERRE:
 "Gracias, Sandra. Ya tengo suficiente para evaluar si el mensaje conecta con una agenda Grupo Aval: holding, pagos interoperables, ciberseguridad, open finance, eficiencia y valor medible."
