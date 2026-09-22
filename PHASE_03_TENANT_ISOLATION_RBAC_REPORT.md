@@ -555,5 +555,57 @@ Todos los tests anteriores (Fases 1–2) se mantienen verdes — ver
 
 ---
 
+## PHASE_03_FIXES_ADDENDUM (round `PASS_WITH_FIXES`)
+
+La revisión encontró un hueco real en `SESSION_OWNERSHIP`: el chequeo de
+`/session/end` verificaba `stored.owner_uid === req.auth.uid` pero **no**
+`stored.organization_id === req.appContext.organizationId`. Con eso, un
+mismo uid con Membership activa en Org A y Org B podía iniciar una sesión
+bajo el contexto A y luego terminarla llamando
+`/session/end?organization_id=B` — el chequeo por uid pasaba igual,
+aunque el recurso pertenece a A y el contexto autorizado de esa request
+específica es B.
+
+**Fix:** el chequeo ahora exige ambas condiciones a la vez:
+
+```ts
+if (
+  !stored ||
+  stored.owner_uid !== req.auth!.uid ||
+  stored.organization_id !== req.appContext!.organizationId
+) {
+  return res.status(404).json({ error: "Sesión no encontrada" });
+}
+```
+
+Las tres causas de rechazo (sesión inexistente, uid distinto,
+organización distinta a la autorizada en esta request) devuelven el
+**mismo 404 uniforme** — se mantiene la protección anti-enumeración
+descrita en `SECURITY_NOTES`, ahora extendida a este caso.
+
+**Tests nuevos** (`routes.test.ts`, dentro de
+`describe("Phase 3: session tenant ownership")`):
+1. Un uid con Membership en A y B inicia una sesión bajo contexto A y
+   luego intenta terminarla con `?organization_id=B` → **404**.
+2. El mismo uid termina la misma sesión con `?organization_id=A` (su
+   contexto real) → **200**.
+
+No se tocó nada más de la arquitectura de esta fase — mismo modelo,
+mismo contrato de `requireMembership`, mismo 404 uniforme, sin bypass por
+rol. No se avanzó a Fase 4. No se desplegó.
+
+```
+$ npm test
+backend:  Test Files  7 passed (7) | Tests  76 passed (76)   (antes 74)
+frontend: Test Files  1 passed (1) | Tests   4 passed (4)
+
+$ npm run build
+backend:  tsc -p tsconfig.json  -> sin errores
+frontend: tsc -b && vite build  -> sin errores
+```
+
+---
+
 **Commit de código de esta fase:** `6ba4e12e472b4af10e35d05f570715593744fd61`
+**Commit de este fix:** `4c4072d39734b666352d03b52ac817c3bc8d1393`
 **Este reporte:** commiteado por separado, después del código.
