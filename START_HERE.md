@@ -19,11 +19,13 @@ esté público.
 
 ## 2. Estado (verificado el 22-sep-2026)
 
-- **Fase 1 (auth real, Firebase Auth) y Fase 2 (Organization + Membership +
-  Role) implementadas, aprobadas por revisión técnica, y NO desplegadas
-  todavía.** Ver `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md` y
-  `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md` para el detalle
-  completo (qué cambió, tests, limitaciones, SHA de cada una).
+- **Fase 1 (auth real, Firebase Auth): CERRADA, aprobada por revisión
+  técnica.** Ver `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md`.
+- **Fase 2 (Organization + Membership + Role): implementada, en revisión
+  técnica — recibió `PASS_WITH_FIXES` y los fixes ya se aplicaron; a la
+  espera del PASS final, todavía NO se declara cerrada.** No desplegar
+  hasta recibirlo. Ver `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md`.
+- Ninguna de las dos fases está desplegada todavía.
 - Producción sigue corriendo la versión **anterior** (login hardcoded, sin
   auth real, sin Organization/Membership) hasta que se aprueben y
   desplieguen estas fases:
