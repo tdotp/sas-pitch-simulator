@@ -2,13 +2,15 @@
 
 Pega este archivo (o dile al nuevo chat que lo lea) y podrá continuar sin leer
 el resto de la documentación. Última actualización: 22 de septiembre de 2026
-(Fase 4 implementada, pendiente de revisión).
+(Fase 5 implementada, pendiente de revisión).
 
 ## 1. Qué es
 
 Simulador de vocería ejecutiva por voz para SAS Colombia (SmartPR). La persona
 practica un pitch hablando con un interlocutor C-level simulado y recibe un
-reporte de evaluación con IA. 3 escenarios: **genérico, Davivienda, Grupo Aval**.
+reporte de evaluación con IA. 3 escenarios: **genérico, Davivienda, Grupo Aval**
+(desde Fase 5, son un `scenarioId` resuelto vía config, no un enum hardcodeado
+en el motor — ver `PHASE_05_ENGINE_CONFIG_REPORT.md`).
 
 Repo local: `/Users/gerardocalambasposada/Documents/Claude_/SAS` (monorepo npm
 workspaces: `backend/`, `frontend/`). Remoto: `tdotp/sas-pitch-simulator` en
@@ -25,15 +27,19 @@ esté público.
   `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md`.
 - **Fase 3 (tenant isolation + RBAC real): CERRADA, aprobada.** Ver
   `PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md`.
-- **Fase 4 (session lifecycle durable): implementada, testeada,
-  pendiente de revisión técnica — todavía NO se declara cerrada.** No
-  desplegar hasta recibir el PASS. Ver
+- **Fase 4 (session lifecycle durable): CERRADA, aprobada.** Ver
   `PHASE_04_SESSION_LIFECYCLE_REPORT.md`.
+- **Fase 5 (ENGINE vs CONFIG): implementada, testeada, pendiente de
+  revisión técnica — todavía NO se declara cerrada.** No desplegar hasta
+  recibir el PASS. **Requiere el fix de `backend/Dockerfile` (copia
+  `config-packages/` a la imagen) antes de desplegar** — sin él, el
+  backend respondería 503 en todo `/session/start`. Ver
+  `PHASE_05_ENGINE_CONFIG_REPORT.md`.
 - Ninguna fase está desplegada todavía.
 - Producción sigue corriendo la versión **original** (login hardcoded, sin
   auth real, sin Organization/Membership, sin tenant isolation, sin
-  session lifecycle) hasta que se apruebe y despliegue todo lo anterior de
-  una vez:
+  session lifecycle, con prompts/rúbricas hardcodeados) hasta que se
+  apruebe y despliegue todo lo anterior de una vez:
   - Frontend: https://smartpr-pitch-agent.web.app (Firebase Hosting)
   - Backend: https://185-215-180-182.nip.io (VPS, Docker + Caddy, HTTPS vía nip.io)
 - El código pasa build y tests localmente (backend + frontend), pero
@@ -62,10 +68,9 @@ signed URL al inicio (`POST /session/start`) y evalúa al final (`POST /session/
 
 | Qué | Archivo |
 |---|---|
-| Prompts del entrevistador (3 escenarios, flujo de 2 repreguntas) | `backend/src/data/prompts.ts` |
-| Rúbricas de evaluación | `backend/src/data/rubrics.ts` |
-| Perfiles de cliente / playbook SAS | `backend/src/data/profiles.ts`, `playbook.ts` |
-| Prompt del evaluador (Claude) | `backend/src/data/evaluatorPrompt.ts` |
+| Paquetes de configuración (prompts, rúbricas, perfiles, playbook por escenario) | `backend/config-packages/sas-colombia/v1/**` |
+| Schemas + loader + resolver de configuración (Fase 5) | `backend/src/engine-config/{schema,loader,resolver}.ts` |
+| Motor genérico de prompts (entrevistador + evaluador) | `backend/src/engine/{promptBuilder,evaluatorPromptBuilder}.ts` |
 | Métricas de habla (regex, sin LLM) | `backend/src/services/metrics.ts` |
 | ElevenLabs (signed URL, voces) | `backend/src/services/elevenlabs.ts` |
 | Rutas + token compartido + rate limit | `backend/src/routes.ts` |
@@ -165,29 +170,31 @@ crítico (P0) original:
   Fase 3**: ahora requiere Membership + rol (AGENCY_ADMIN/CLIENT_ADMIN/
   COACH; SPOKESPERSON → 403) y solo devuelve sesiones de la organización
   resuelta del caller — nunca "todas".
-- Estado de sesión en un `Map` en memoria del proceso. **Resuelto
-  parcialmente en Fase 3**: el ownership check de `/session/end` y las
-  queries de `/admin/sessions` ahora leen de Firestore (repositorio de
-  sesiones), no de un Map — durable y multi-instancia para ese propósito
-  específico. La máquina de estados completa del ciclo de vida de una
-  sesión (abandono, reintentos, etc.) sigue siendo Fase 4.
+- Estado de sesión en un `Map` en memoria del proceso. **Resuelto en
+  Fase 4**: session lifecycle completo (estados, idempotencia,
+  concurrencia) sobre Firestore, sin `Map`.
+- ~~prompts/rúbricas hardcoded (cliente nuevo = código + deploy)~~
+  **Resuelto en Fase 5**: prompts, rúbricas, perfiles, playbook y voces
+  ahora son paquetes de configuración versionados (`backend/config-packages/`),
+  validados en runtime (Zod) — agregar un cliente nuevo es agregar una
+  carpeta, no tocar código. Ver `PHASE_05_ENGINE_CONFIG_REPORT.md`.
 
 Otros (P1): sin instrumentación de latencia, rate-limit por IP (puede bloquear a
-una oficina entera), sin timeouts ni retries hacia ElevenLabs/OpenRouter,
-prompts/rúbricas hardcoded (cliente nuevo = código + deploy).
+una oficina entera), sin timeouts ni retries hacia ElevenLabs/OpenRouter
+más allá de lo que Fase 4 ya agregó.
 
-Recomendación: NO migrar a Postgres (Firestore alcanza). Con Fases 1–3 ya
-implementadas, el siguiente paso es Fase 4 (session lifecycle durable
-completo) o Fase 5 (ENGINE vs CONFIG), según prioridad de negocio.
-Estimación original: ~48–74 días-dev (~12–17 semanas con 1 dev). Detalle
-completo en `SPOKESPERSON_TRAINING_SCALING_REPORT.md` y
+Recomendación: NO migrar a Postgres (Firestore alcanza). Con Fases 1–5 ya
+implementadas, el siguiente paso es Fase 6 (versioning/provenance de
+configuración). Estimación original: ~48–74 días-dev (~12–17 semanas con
+1 dev). Detalle completo en `SPOKESPERSON_TRAINING_SCALING_REPORT.md` y
 `PLAN_TRABAJO_ESCALAMIENTO_MULTI_CLIENTE.md`.
 
 ## 9. Pendientes sugeridos
 
-1. **Revisar y aprobar `PHASE_04_SESSION_LIFECYCLE_REPORT.md`, y luego
-   desplegar Fases 1–4 juntas** (frontend a Firebase Hosting, backend al
-   VPS) — hoy solo están implementadas y testeadas localmente.
+1. **Revisar y aprobar `PHASE_05_ENGINE_CONFIG_REPORT.md`, y luego
+   desplegar Fases 1–5 juntas** (frontend a Firebase Hosting, backend al
+   VPS — recordar el fix de `Dockerfile` para `config-packages/`) — hoy
+   solo están implementadas y testeadas localmente.
 2. Probar los 3 escenarios completos (no solo el genérico) con usuarios reales y
    confirmar que el cierre a los 3s de silencio se siente natural en un celular
    con conversación de voz real.
@@ -203,5 +210,6 @@ completo en `SPOKESPERSON_TRAINING_SCALING_REPORT.md` y
 `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md` (Organization +
 Membership + Role), `PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md` (tenant
 isolation + RBAC real), `PHASE_04_SESSION_LIFECYCLE_REPORT.md` (session
-lifecycle durable — 22-sep-2026), `ACCESOS.md` (credenciales, no
-versionado), `git log` (historial con mensajes detallados de cada cambio).
+lifecycle durable), `PHASE_05_ENGINE_CONFIG_REPORT.md` (ENGINE vs
+CONFIG — 22-sep-2026), `ACCESOS.md` (credenciales, no versionado),
+`git log` (historial con mensajes detallados de cada cambio).
