@@ -161,19 +161,32 @@ router.post(
     }
 
     // Ownership (Phase 3, persisted — not the Phase 1 in-memory Map
-    // anymore): the simplest correct rule per the reviewed spec — the
-    // authenticated caller must be the uid that started the session.
+    // anymore): the authenticated caller must be the uid that started the
+    // session AND the session must belong to the organization currently
+    // authorized by req.appContext (PASS_WITH_FIXES round: the uid-only
+    // check missed a real case — a uid with Membership in both A and B
+    // could start a session under context A, then call /session/end with
+    // ?organization_id=B and pass the uid check despite the resource
+    // belonging to A, not the org actually authorized for that request).
+    // Both conditions are required together.
+    //
     // CLIENT_ADMIN/COACH/AGENCY_ADMIN get NO special bypass here on
     // purpose: administrative access to session RESULTS is a read
     // concern (GET /admin/sessions), not something that should let
     // anyone but the starter mutate/complete a session via this route.
     //
     // A missing session (never existed, wrong id, or a legacy pre-Phase-3
-    // doc without organization_id — see LEGACY_SESSION_POLICY) and a
-    // session that exists but belongs to someone else both return the
-    // SAME 404, deliberately: distinguishing them would let a caller
-    // enumerate which session_ids are real but not theirs.
-    if (!stored || stored.owner_uid !== req.auth!.uid) {
+    // doc without organization_id — see LEGACY_SESSION_POLICY), a session
+    // that belongs to someone else, and a session that belongs to the
+    // right uid but the wrong (currently unauthorized) organization all
+    // return the SAME 404, deliberately: distinguishing any of these
+    // would let a caller enumerate which session_ids are real but not
+    // fully theirs-in-this-context.
+    if (
+      !stored ||
+      stored.owner_uid !== req.auth!.uid ||
+      stored.organization_id !== req.appContext!.organizationId
+    ) {
       return res.status(404).json({ error: "Sesión no encontrada" });
     }
 

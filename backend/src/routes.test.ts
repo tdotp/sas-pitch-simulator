@@ -310,6 +310,62 @@ describe("Phase 3: session tenant ownership", () => {
       });
     expect(endRes.status).toBe(404);
   });
+
+  it("same uid with Membership in A and B: a session started under context A cannot be ended under context B (404)", async () => {
+    const app = buildApp();
+
+    // Started under context A.
+    verifyIdTokenMock.mockResolvedValue({ uid: "multi-org-uid", email: "multi@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([
+      membership({ id: "m-a", user_id: "multi-org-uid", organization_id: "org-a", role: "AGENCY_ADMIN" }),
+      membership({ id: "m-b", user_id: "multi-org-uid", organization_id: "org-b", role: "AGENCY_ADMIN" }),
+    ]);
+    const startRes = await request(app)
+      .post("/api/session/start?organization_id=org-a")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    expect(startRes.status).toBe(200);
+    const sessionId = startRes.body.session_id as string;
+    expect(sessionsStore.get(sessionId)?.organization_id).toBe("org-a");
+
+    // Same uid, same real ownership — but this request's authorized
+    // context is B, not the session's actual organization (A). The uid
+    // check alone would pass; the organization check must still reject.
+    const endRes = await request(app)
+      .post("/api/session/end?organization_id=org-b")
+      .set("Authorization", "Bearer t2")
+      .send({
+        session_id: sessionId,
+        duration_seconds: 10,
+        transcript: [{ role: "user", text: "hola" }],
+      });
+    expect(endRes.status).toBe(404);
+  });
+
+  it("same uid with Membership in A and B: ending the same session under its real context A succeeds (200)", async () => {
+    const app = buildApp();
+
+    verifyIdTokenMock.mockResolvedValue({ uid: "multi-org-uid", email: "multi@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([
+      membership({ id: "m-a", user_id: "multi-org-uid", organization_id: "org-a", role: "AGENCY_ADMIN" }),
+      membership({ id: "m-b", user_id: "multi-org-uid", organization_id: "org-b", role: "AGENCY_ADMIN" }),
+    ]);
+    const startRes = await request(app)
+      .post("/api/session/start?organization_id=org-a")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    const sessionId = startRes.body.session_id as string;
+
+    const endRes = await request(app)
+      .post("/api/session/end?organization_id=org-a")
+      .set("Authorization", "Bearer t2")
+      .send({
+        session_id: sessionId,
+        duration_seconds: 10,
+        transcript: [{ role: "user", text: "hola" }],
+      });
+    expect(endRes.status).toBe(200);
+  });
 });
 
 describe("Phase 3: GET /admin/sessions — RBAC + tenant scoping", () => {
