@@ -1,7 +1,8 @@
 # START HERE — SAS Pitch Simulator
 
 Pega este archivo (o dile al nuevo chat que lo lea) y podrá continuar sin leer
-el resto de la documentación. Última actualización: 22 de septiembre de 2026.
+el resto de la documentación. Última actualización: 22 de septiembre de 2026
+(Fase 2 cerrada).
 
 ## 1. Qué es
 
@@ -11,16 +12,21 @@ reporte de evaluación con IA. 3 escenarios: **genérico, Davivienda, Grupo Aval
 
 Repo local: `/Users/gerardocalambasposada/Documents/Claude_/SAS` (monorepo npm
 workspaces: `backend/`, `frontend/`). Remoto: `tdotp/sas-pitch-simulator` en
-GitHub (**privado** — contiene correos y prompts propios de SAS).
+GitHub — **actualmente PÚBLICO** (a pedido explícito, para que una revisión
+externa vaya comparando avances; volver a ponerlo privado cuando esa
+revisión termine). Contiene correos y prompts propios de SAS mientras
+esté público.
 
 ## 2. Estado (verificado el 22-sep-2026)
 
-- **Fase 1 de escalamiento (auth real) implementada y NO desplegada
-  todavía.** Login/logout/reset con Firebase Auth real, backend verifica
-  ID token + allowlist. Ver `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md` para
-  el detalle completo (qué cambió, tests, limitaciones, SHA).
+- **Fase 1 (auth real, Firebase Auth) y Fase 2 (Organization + Membership +
+  Role) implementadas, aprobadas por revisión técnica, y NO desplegadas
+  todavía.** Ver `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md` y
+  `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md` para el detalle
+  completo (qué cambió, tests, limitaciones, SHA de cada una).
 - Producción sigue corriendo la versión **anterior** (login hardcoded, sin
-  auth real) hasta que se apruebe y despliegue la Fase 1:
+  auth real, sin Organization/Membership) hasta que se aprueben y
+  desplieguen estas fases:
   - Frontend: https://smartpr-pitch-agent.web.app (Firebase Hosting)
   - Backend: https://185-215-180-182.nip.io (VPS, Docker + Caddy, HTTPS vía nip.io)
 - El código de Fase 1 pasa build y tests localmente (backend + frontend),
@@ -142,38 +148,47 @@ Preparación multi-cliente: **LOW** (evaluación previa a Fase 1). Lo crítico (
 - `GET /admin/sessions` devuelve sesiones de todos sin control de acceso.
   **Sigue abierto** — ahora exige login válido y permitido, pero no hay
   roles: cualquier usuario allowlisted puede leer todas las sesiones.
+  **Sigue abierto tras Fase 2** — `GET /me` resuelve organización/rol pero
+  ninguna ruta de recursos lo usa todavía; eso es Fase 3.
 - Estado de sesión en un `Map` en memoria del proceso (se pierde al reiniciar).
   **Sigue abierto** — la Fase 1 agregó un chequeo de ownership sobre ese
   mismo `Map` (protección temporal, no durable); la solución real
   (Firestore-backed) es Fase 4.
+- ~~No existe el concepto de organización/tenant...~~ **Modelo base
+  resuelto en Fase 2** (22-sep-2026): `Organization` + `Membership` + `Role`
+  en Firestore, con resolución server-side (`GET /me`). **Tenant isolation
+  real (aplicarlo a los endpoints) sigue sin existir — eso es Fase 3.** Ver
+  `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md`.
 
 Otros (P1): sin instrumentación de latencia, rate-limit por IP (puede bloquear a
 una oficina entera), persistencia fire-and-forget sin reintentos, sin timeouts ni
 retries hacia ElevenLabs/OpenRouter, prompts/rúbricas hardcoded (cliente nuevo =
 código + deploy).
 
-Recomendación: NO migrar a Postgres (Firestore alcanza). Con Fase 1 ya
-implementada, el siguiente paso es Fase 2 (`Organization/Membership` +
-roles). Estimación original: ~48–74 días-dev (~12–17 semanas con 1 dev).
-Detalle completo en `SPOKESPERSON_TRAINING_SCALING_REPORT.md` y
+Recomendación: NO migrar a Postgres (Firestore alcanza). Con Fases 1 y 2 ya
+implementadas, el siguiente paso es Fase 3 (tenant isolation real —
+aplicar Membership a los endpoints). Estimación original: ~48–74 días-dev
+(~12–17 semanas con 1 dev). Detalle completo en
+`SPOKESPERSON_TRAINING_SCALING_REPORT.md` y
 `PLAN_TRABAJO_ESCALAMIENTO_MULTI_CLIENTE.md`.
 
 ## 9. Pendientes sugeridos
 
-1. **Revisar y aprobar `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md`, y luego
-   desplegar Fase 1** (frontend a Firebase Hosting, backend al VPS) — hoy
-   solo está implementada y testeada localmente.
+1. **Revisar y aprobar `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md`,
+   y luego desplegar Fases 1+2** (frontend a Firebase Hosting, backend al
+   VPS) — hoy solo están implementadas y testeadas localmente.
 2. Probar los 3 escenarios completos (no solo el genérico) con usuarios reales y
    confirmar que el cierre a los 3s de silencio se siente natural en un celular
    con conversación de voz real.
-3. Decidir si se avanza a Fase 2 (Organization/Membership/roles) o se
-   mantiene como herramienta interna de un solo equipo.
+3. Fase 3: aplicar `requireMembership` a `/session/*`,
+   `/metrics/analyze` y, sobre todo, cerrar el P0 de `/admin/sessions`.
 4. Considerar dominio propio para el backend (hoy `nip.io`).
 
 ## 10. Documentos existentes (solo si necesitas más detalle)
 
 `report.md` (avance), `HANDOFF.md` (contexto de sesión previa),
 `SPOKESPERSON_TRAINING_SCALING_REPORT.md` (análisis multi-cliente),
-`PHASE_01_AUTH_IMPLEMENTATION_REPORT.md` (auth real: qué cambió, tests,
-limitaciones — 22-sep-2026), `ACCESOS.md` (credenciales, no versionado),
+`PHASE_01_AUTH_IMPLEMENTATION_REPORT.md` (auth real — 22-sep-2026),
+`PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md` (Organization +
+Membership + Role — 22-sep-2026), `ACCESOS.md` (credenciales, no versionado),
 `git log` (historial con mensajes detallados de cada cambio).
