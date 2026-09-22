@@ -53,16 +53,13 @@ export const config = {
   // It is anti-abuse only — never treat it as authentication.
   apiSharedToken: req("API_SHARED_TOKEN"),
 
-  // TEMPORARY allowlist (Phase 1 auth). Firebase Auth's email/password
-  // provider lets anyone with the public web apiKey self-register, so
-  // verifying the ID token alone is not enough to gate access. Until
-  // Organization/Membership (Phase 2) replaces this, only these exact
-  // emails may use the app after authenticating. Comma-separated, case
-  // -insensitive. Empty means nobody is allowed (fail closed).
-  authAllowedEmails: (process.env.AUTH_ALLOWED_EMAILS ?? "")
-    .split(",")
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean),
+  // AUTH_ALLOWED_EMAILS (the Phase 1 temporary allowlist) was retired in
+  // Phase 3: every sensitive route now requires requireMembership, which
+  // rejects any Firebase user without a real AppUser+Membership record —
+  // the same protection the allowlist gave, without a second parallel
+  // system. See ALLOWLIST_DECISION in
+  // PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md. If AUTH_ALLOWED_EMAILS is
+  // still set in the environment, it is now simply unused.
 } as const;
 
 export function assertElevenReady(): string | null {

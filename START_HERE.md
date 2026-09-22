@@ -2,7 +2,7 @@
 
 Pega este archivo (o dile al nuevo chat que lo lea) y podrá continuar sin leer
 el resto de la documentación. Última actualización: 22 de septiembre de 2026
-(Fase 2 cerrada).
+(Fase 3 implementada, pendiente de revisión).
 
 ## 1. Qué es
 
@@ -19,24 +19,28 @@ esté público.
 
 ## 2. Estado (verificado el 22-sep-2026)
 
-- **Fase 1 (auth real, Firebase Auth): CERRADA, aprobada por revisión
-  técnica.** Ver `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md`.
-- **Fase 2 (Organization + Membership + Role): implementada, en revisión
-  técnica — recibió `PASS_WITH_FIXES` y los fixes ya se aplicaron; a la
-  espera del PASS final, todavía NO se declara cerrada.** No desplegar
-  hasta recibirlo. Ver `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md`.
-- Ninguna de las dos fases está desplegada todavía.
-- Producción sigue corriendo la versión **anterior** (login hardcoded, sin
-  auth real, sin Organization/Membership) hasta que se aprueben y
-  desplieguen estas fases:
+- **Fase 1 (auth real, Firebase Auth): CERRADA, aprobada.** Ver
+  `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md`.
+- **Fase 2 (Organization + Membership + Role): CERRADA, aprobada.** Ver
+  `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md`.
+- **Fase 3 (tenant isolation + RBAC real): implementada, testeada,
+  pendiente de revisión técnica — todavía NO se declara cerrada.** No
+  desplegar hasta recibir el PASS. Ver
+  `PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md`.
+- Ninguna fase está desplegada todavía.
+- Producción sigue corriendo la versión **original** (login hardcoded, sin
+  auth real, sin Organization/Membership, sin tenant isolation) hasta que
+  se apruebe y despliegue todo lo anterior de una vez:
   - Frontend: https://smartpr-pitch-agent.web.app (Firebase Hosting)
   - Backend: https://185-215-180-182.nip.io (VPS, Docker + Caddy, HTTPS vía nip.io)
-- El código de Fase 1 pasa build y tests localmente (backend + frontend),
-  pero **no se ha hecho `firebase deploy` ni redeploy del VPS** con estos
-  cambios — desplegar sin antes crear/avisar a los usuarios los dejaría
-  fuera.
-- Firestore: 68 sesiones de prueba (16 completas, 51 abandonadas), de antes
-  de esta fase.
+- El código pasa build y tests localmente (backend + frontend), pero
+  **no se ha hecho `firebase deploy` ni redeploy del VPS** con ninguno de
+  estos cambios — desplegar sin antes verificar el impacto en los 4
+  usuarios reales (todos ya tienen Membership vía el bootstrap de Fase 2)
+  es lo primero a hacer después de la aprobación.
+- Firestore: 68 sesiones de prueba (16 completas, 51 abandonadas) de antes
+  de Fase 2 — son "legacy": sin `organization_id`, así que ninguna ruta
+  nueva las expone (ver `PHASE_03...` § `LEGACY_SESSION_POLICY`).
 
 ## 3. Arquitectura en 6 líneas
 
@@ -62,7 +66,10 @@ signed URL al inicio (`POST /session/start`) y evalúa al final (`POST /session/
 | Métricas de habla (regex, sin LLM) | `backend/src/services/metrics.ts` |
 | ElevenLabs (signed URL, voces) | `backend/src/services/elevenlabs.ts` |
 | Rutas + token compartido + rate limit | `backend/src/routes.ts` |
-| Firestore | `backend/src/firebase.ts` |
+| Firebase Admin bootstrap (Auth) | `backend/src/firebase.ts` |
+| Datos: Organization/User/Membership/Session (Firestore) | `backend/src/repositories/*.ts` |
+| Contexto server-side (org/rol) + selección multi-org | `backend/src/services/context.ts`, `backend/src/middleware/context.ts` |
+| RBAC por rol (`requireAnyRole`) | `backend/src/middleware/roles.ts` |
 | Máquina de estados de la app (7 pantallas) | `frontend/src/App.tsx` |
 | Lógica de conversación (turnos, cierre por silencio) | `frontend/src/components/PracticeSession.tsx` |
 | Usuarios de login + escenarios (UI) | `frontend/src/config.ts` |
@@ -71,17 +78,20 @@ signed URL al inicio (`POST /session/start`) y evalúa al final (`POST /session/
 
 ## 5. Decisiones y comportamientos que NO son obvios
 
-- **Auth (desde Fase 1, 22-sep-2026)**: Firebase Auth real (email/password).
-  El backend verifica el ID token (`Authorization: Bearer`) y además exige
-  que el email esté en `AUTH_ALLOWED_EMAILS` (allowlist temporal — el
-  proveedor email/password permite auto-registro, así que un token válido
-  por sí solo no basta). Token inválido → 401; token válido pero no
-  permitido → 403. El frontend reintenta una sola vez con token refrescado
-  ante un 401; nunca reintenta ante un 403. No hay signup en el frontend —
-  las cuentas se crean con Admin SDK. `/admin/sessions` sigue siendo un P0
-  abierto: cualquier usuario autenticado y permitido puede leer todas las
-  sesiones (no hay roles todavía). Detalle completo en
-  `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md`.
+- **Auth + autorización (Fases 1–3)**: Firebase Auth real (email/password).
+  El backend verifica el ID token (`Authorization: Bearer`, → 401 si
+  inválido) y además exige una **Membership activa en una Organization
+  activa** (Firestore, → 403 si no) — la allowlist de correos
+  (`AUTH_ALLOWED_EMAILS`) de Fase 1 se **retiró en Fase 3**, Membership la
+  reemplaza. Sobre eso, `requireAnyRole(...)` (Fase 3) filtra por rol
+  cuando aplica (p. ej. `/admin/sessions` excluye SPOKESPERSON). El
+  frontend reintenta una sola vez con token refrescado ante un 401; nunca
+  reintenta ante un 403. No hay signup en el frontend — las cuentas se
+  crean con Admin SDK, las memberships con los repositorios de
+  `backend/src/repositories/`. Detalle completo en
+  `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md`,
+  `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md` y
+  `PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md`.
 - **Repreguntas**: exactamente 2. La 1ª textual de una lista fija; la 2ª de la
   misma lista pero anclada a lo que la persona respondió. Lo aplica el prompt (el
   LLM de ElevenLabs), no hay enforcement en código.
@@ -142,55 +152,52 @@ Si trabajas desde otra máquina, copia esas llaves como archivos (no como texto)
 
 ## 8. Riesgos y deuda conocida (resumen del reporte de escalamiento)
 
-Preparación multi-cliente: **LOW** (evaluación previa a Fase 1). Lo crítico (P0):
-- No existe el concepto de organización/tenant en ningún lado. **Abierto.**
-- ~~No hay autenticación real...~~ **Resuelto en Fase 1** (22-sep-2026):
-  Firebase Auth + verificación de ID token server-side + allowlist temporal.
-  Ver `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md`.
-- `GET /admin/sessions` devuelve sesiones de todos sin control de acceso.
-  **Sigue abierto** — ahora exige login válido y permitido, pero no hay
-  roles: cualquier usuario allowlisted puede leer todas las sesiones.
-  **Sigue abierto tras Fase 2** — `GET /me` resuelve organización/rol pero
-  ninguna ruta de recursos lo usa todavía; eso es Fase 3.
-- Estado de sesión en un `Map` en memoria del proceso (se pierde al reiniciar).
-  **Sigue abierto** — la Fase 1 agregó un chequeo de ownership sobre ese
-  mismo `Map` (protección temporal, no durable); la solución real
-  (Firestore-backed) es Fase 4.
-- ~~No existe el concepto de organización/tenant...~~ **Modelo base
-  resuelto en Fase 2** (22-sep-2026): `Organization` + `Membership` + `Role`
-  en Firestore, con resolución server-side (`GET /me`). **Tenant isolation
-  real (aplicarlo a los endpoints) sigue sin existir — eso es Fase 3.** Ver
-  `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md`.
+Preparación multi-cliente: subió de **LOW** (evaluación previa a Fase 1) —
+detalle actualizado en `PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md`. Lo
+crítico (P0) original:
+- ~~No existe el concepto de organización/tenant...~~ **Resuelto en Fase 2**
+  (modelo) **y Fase 3** (aplicado a los endpoints reales).
+- ~~No hay autenticación real...~~ **Resuelto en Fase 1.**
+- ~~`GET /admin/sessions` devuelve sesiones de todos...~~ **Resuelto en
+  Fase 3**: ahora requiere Membership + rol (AGENCY_ADMIN/CLIENT_ADMIN/
+  COACH; SPOKESPERSON → 403) y solo devuelve sesiones de la organización
+  resuelta del caller — nunca "todas".
+- Estado de sesión en un `Map` en memoria del proceso. **Resuelto
+  parcialmente en Fase 3**: el ownership check de `/session/end` y las
+  queries de `/admin/sessions` ahora leen de Firestore (repositorio de
+  sesiones), no de un Map — durable y multi-instancia para ese propósito
+  específico. La máquina de estados completa del ciclo de vida de una
+  sesión (abandono, reintentos, etc.) sigue siendo Fase 4.
 
 Otros (P1): sin instrumentación de latencia, rate-limit por IP (puede bloquear a
-una oficina entera), persistencia fire-and-forget sin reintentos, sin timeouts ni
-retries hacia ElevenLabs/OpenRouter, prompts/rúbricas hardcoded (cliente nuevo =
-código + deploy).
+una oficina entera), sin timeouts ni retries hacia ElevenLabs/OpenRouter,
+prompts/rúbricas hardcoded (cliente nuevo = código + deploy).
 
-Recomendación: NO migrar a Postgres (Firestore alcanza). Con Fases 1 y 2 ya
-implementadas, el siguiente paso es Fase 3 (tenant isolation real —
-aplicar Membership a los endpoints). Estimación original: ~48–74 días-dev
-(~12–17 semanas con 1 dev). Detalle completo en
-`SPOKESPERSON_TRAINING_SCALING_REPORT.md` y
+Recomendación: NO migrar a Postgres (Firestore alcanza). Con Fases 1–3 ya
+implementadas, el siguiente paso es Fase 4 (session lifecycle durable
+completo) o Fase 5 (ENGINE vs CONFIG), según prioridad de negocio.
+Estimación original: ~48–74 días-dev (~12–17 semanas con 1 dev). Detalle
+completo en `SPOKESPERSON_TRAINING_SCALING_REPORT.md` y
 `PLAN_TRABAJO_ESCALAMIENTO_MULTI_CLIENTE.md`.
 
 ## 9. Pendientes sugeridos
 
-1. **Revisar y aprobar `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md`,
-   y luego desplegar Fases 1+2** (frontend a Firebase Hosting, backend al
-   VPS) — hoy solo están implementadas y testeadas localmente.
+1. **Revisar y aprobar `PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md`, y
+   luego desplegar Fases 1–3 juntas** (frontend a Firebase Hosting,
+   backend al VPS) — hoy solo están implementadas y testeadas localmente.
 2. Probar los 3 escenarios completos (no solo el genérico) con usuarios reales y
    confirmar que el cierre a los 3s de silencio se siente natural en un celular
    con conversación de voz real.
-3. Fase 3: aplicar `requireMembership` a `/session/*`,
-   `/metrics/analyze` y, sobre todo, cerrar el P0 de `/admin/sessions`.
+3. Fase 4: session lifecycle durable completo (reemplazar el resto del
+   `Map` en memoria, formalizar estados de abandono).
 4. Considerar dominio propio para el backend (hoy `nip.io`).
 
 ## 10. Documentos existentes (solo si necesitas más detalle)
 
 `report.md` (avance), `HANDOFF.md` (contexto de sesión previa),
 `SPOKESPERSON_TRAINING_SCALING_REPORT.md` (análisis multi-cliente),
-`PHASE_01_AUTH_IMPLEMENTATION_REPORT.md` (auth real — 22-sep-2026),
+`PHASE_01_AUTH_IMPLEMENTATION_REPORT.md` (auth real),
 `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md` (Organization +
-Membership + Role — 22-sep-2026), `ACCESOS.md` (credenciales, no versionado),
-`git log` (historial con mensajes detallados de cada cambio).
+Membership + Role), `PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md` (tenant
+isolation + RBAC real — 22-sep-2026), `ACCESOS.md` (credenciales, no
+versionado), `git log` (historial con mensajes detallados de cada cambio).

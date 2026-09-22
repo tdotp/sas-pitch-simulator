@@ -1,27 +1,23 @@
-// Firebase Admin bootstrap + persistence helpers.
+// Firebase Admin bootstrap.
 //
 // Firebase Admin (the app itself, and therefore `admin.auth()` used by the
-// Phase 1 auth middleware to verify ID tokens) initializes whenever valid
+// auth middleware to verify ID tokens) initializes whenever valid
 // credentials are configured, REGARDLESS of PERSISTENCE_DISABLED.
 // PERSISTENCE_DISABLED only controls whether Firestore reads/writes happen
-// — it must never gate Auth availability. Firestore persistence is OFF the
-// critical path anyway: writes are fire-and-forget and never block the
-// response. If Firebase isn't configured at all (creds pending), both Auth
-// and persistence degrade gracefully (Auth verification will fail closed —
-// requireAuth 401s everything — and persistence falls back to console log).
+// — it must never gate Auth availability. If Firebase isn't configured at
+// all (creds pending), both Auth and persistence degrade gracefully (Auth
+// verification will fail closed — requireAuth 401s everything).
+//
+// Session/Organization/User/Membership persistence lives in
+// backend/src/repositories/*.ts (Phase 2/3), not here — this module is
+// only the Firebase Admin app bootstrap + the two readiness flags other
+// modules check (isAuthReady, isPersistenceEnabled).
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import admin from "firebase-admin";
 import { config } from "./config.js";
-import type {
-  EvaluationResult,
-  SessionRecord,
-  SpeechMetrics,
-  TranscriptTurn,
-} from "./types.js";
 
-let db: admin.firestore.Firestore | null = null;
 let persistenceEnabled = false;
 let authReady = false;
 
@@ -35,8 +31,8 @@ export function initFirebase(): void {
     return;
   }
 
-  // Firebase Admin app: needed for admin.auth().verifyIdToken() (Phase 1
-  // auth), independent of whether Firestore persistence is enabled.
+  // Firebase Admin app: needed for admin.auth().verifyIdToken() (auth
+  // middleware), independent of whether Firestore persistence is enabled.
   try {
     const serviceAccount = JSON.parse(
       readFileSync(resolve(path), "utf-8")
@@ -66,7 +62,7 @@ export function initFirebase(): void {
   }
 
   try {
-    db = admin.firestore();
+    admin.firestore(); // just confirms it's reachable; repositories call it themselves
     persistenceEnabled = true;
     console.log("[firebase] Firestore listo. Persistencia activa.");
   } catch (err) {
@@ -84,75 +80,4 @@ export function isPersistenceEnabled(): boolean {
 // before it silently breaks every authenticated route in production.
 export function isAuthReady(): boolean {
   return authReady;
-}
-
-export async function saveSessionStart(session: SessionRecord): Promise<void> {
-  if (!persistenceEnabled || !db) {
-    console.log("[firebase:log] session start", session.session_id);
-    return;
-  }
-  try {
-    await db
-      .collection("sessions")
-      .doc(session.session_id)
-      .set({ ...session, created_at: admin.firestore.FieldValue.serverTimestamp() });
-  } catch (err) {
-    console.error("[firebase] saveSessionStart error:", (err as Error).message);
-  }
-}
-
-export async function saveSessionResult(params: {
-  session_id: string;
-  duration_seconds: number;
-  transcript: TranscriptTurn[];
-  metrics: SpeechMetrics;
-  evaluation: EvaluationResult;
-}): Promise<void> {
-  if (!persistenceEnabled || !db) {
-    console.log("[firebase:log] session result", params.session_id, {
-      overall: params.evaluation.overall_score,
-    });
-    return;
-  }
-  try {
-    const full = params.transcript
-      .map((t) => `${t.role === "user" ? "SANDRA" : "AGENTE"}: ${t.text}`)
-      .join("\n");
-    const userOnly = params.transcript
-      .filter((t) => t.role === "user")
-      .map((t) => t.text)
-      .join("\n");
-    const agentOnly = params.transcript
-      .filter((t) => t.role === "agent")
-      .map((t) => t.text)
-      .join("\n");
-
-    await db
-      .collection("sessions")
-      .doc(params.session_id)
-      .set(
-        {
-          status: "completed",
-          ended_at: new Date().toISOString(),
-          duration_seconds: params.duration_seconds,
-          transcript: { full, user_only: userOnly, agent_only: agentOnly },
-          metrics: params.metrics,
-          evaluation: params.evaluation,
-          updated_at: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true }
-      );
-  } catch (err) {
-    console.error("[firebase] saveSessionResult error:", (err as Error).message);
-  }
-}
-
-export async function listSessions(limit = 50): Promise<unknown[]> {
-  if (!persistenceEnabled || !db) return [];
-  const snap = await db
-    .collection("sessions")
-    .orderBy("created_at", "desc")
-    .limit(limit)
-    .get();
-  return snap.docs.map((d) => d.data());
 }

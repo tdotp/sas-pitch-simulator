@@ -1,14 +1,20 @@
-// Integration tests for the auth gate on sensitive routes, and for the
-// Phase-1 identity/ownership rules: identity comes from the verified token,
-// never the request body, and /session/end rejects a different uid than
-// the one that started the session (temporary, in-memory ownership check).
-//
-// External providers (ElevenLabs, OpenRouter/evaluator, Firestore) and
+// Integration tests for the auth/membership/RBAC gate on sensitive routes,
+// and for tenant isolation + session ownership (Phase 3). External
+// providers (ElevenLabs, OpenRouter/evaluator, Firestore) and
 // firebase-admin's token verification are mocked so these tests run
 // without real credentials or network access.
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import express from "express";
 import request from "supertest";
+
+// This file's route coverage now sends well over 20 requests through the
+// SAME router (and therefore the same rate-limiter instance/store) — the
+// module-level 20-req/min limiter in routes.ts isn't what these tests are
+// about, so it's neutralized here to avoid spurious 429s unrelated to
+// auth/RBAC/tenant-isolation behavior.
+vi.mock("express-rate-limit", () => ({
+  default: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+}));
 
 const verifyIdTokenMock = vi.fn();
 
@@ -21,7 +27,6 @@ vi.mock("firebase-admin", () => ({
 vi.mock("./config.js", () => ({
   config: {
     apiSharedToken: "", // shared-token gate disabled for these tests
-    authAllowedEmails: ["allowed@test.com", "other-allowed@test.com"],
   },
   assertElevenReady: () => null,
   assertOpenRouterReady: () => null,
@@ -45,17 +50,30 @@ vi.mock("./services/evaluator.js", () => ({
 }));
 
 vi.mock("./firebase.js", () => ({
-  saveSessionStart: vi.fn(async () => {}),
-  saveSessionResult: vi.fn(async () => {}),
-  listSessions: vi.fn(async () => []),
   isAuthReady: vi.fn(() => true),
 }));
 
-// Phase 2: GET /me resolves its context through requireMembership ->
-// resolveAppContext -> these repositories. Mocked so these tests never
-// touch real Firestore; each /me test controls exactly what "exists".
-// Defaults (an active user, and every organization active) mean a test
-// only has to override what it actually cares about.
+// Phase 3: sessions are persisted/read through this repository instead of
+// an in-memory Map. Mocked so these tests never touch real Firestore —
+// each test controls exactly what "exists" via an in-memory fake.
+const sessionsStore = new Map<string, Record<string, unknown>>();
+vi.mock("./repositories/sessions.js", () => ({
+  createSession: vi.fn(async (session: Record<string, unknown>) => {
+    sessionsStore.set(session.session_id as string, session);
+  }),
+  getSessionById: vi.fn(async (id: string) => sessionsStore.get(id) ?? null),
+  completeSession: vi.fn(async () => {}),
+  listSessionsByOrganization: vi.fn(async (organizationId: string) =>
+    [...sessionsStore.values()].filter((s) => s.organization_id === organizationId)
+  ),
+}));
+
+// Phase 2: GET /me (and, from Phase 3, every other Membership-gated route)
+// resolves its context through requireMembership -> resolveAppContext ->
+// these repositories. Mocked so these tests never touch real Firestore;
+// each test controls exactly what "exists". Defaults (an active user, and
+// every organization active) mean a test only has to override what it
+// actually cares about.
 const listMembershipsByUserMock = vi.fn();
 vi.mock("./repositories/memberships.js", () => ({
   listMembershipsByUser: (userId: string) => listMembershipsByUserMock(userId),
@@ -85,12 +103,13 @@ beforeEach(() => {
   listMembershipsByUserMock.mockReset();
   getUserMock.mockReset();
   getOrganizationMock.mockReset();
-  // Sane defaults for the GET /me tests below: an active AppUser, and any
-  // organization looked up comes back active. Individual tests override
-  // these to exercise the inactive-user/inactive-org paths.
+  sessionsStore.clear();
+  // Sane defaults: an active AppUser, and any organization looked up
+  // comes back active. Individual tests override these to exercise the
+  // inactive-user/inactive-org paths.
   getUserMock.mockResolvedValue({
     uid: "uid-1",
-    email: "allowed@test.com",
+    email: "user@test.com",
     display_name: null,
     status: "active",
     created_at: "2026-01-01T00:00:00.000Z",
@@ -119,6 +138,28 @@ function membership(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// Auths as `uid` with a single active membership in `organizationId` with
+// `role`. Covers the common case used by most tests below.
+function asSingleOrgUser(
+  uid: string,
+  organizationId: string,
+  role: string,
+  email = `${uid}@test.com`
+) {
+  verifyIdTokenMock.mockResolvedValue({ uid, email });
+  getUserMock.mockResolvedValue({
+    uid,
+    email,
+    display_name: null,
+    status: "active",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+  });
+  listMembershipsByUserMock.mockResolvedValue([
+    membership({ user_id: uid, organization_id: organizationId, role }),
+  ]);
+}
+
 describe("sensitive routes require a valid, allowlisted token", () => {
   it("POST /session/start -> 401 without Authorization header", async () => {
     const res = await request(buildApp())
@@ -136,8 +177,10 @@ describe("sensitive routes require a valid, allowlisted token", () => {
     expect(res.status).toBe(401);
   });
 
-  it("POST /session/start -> 403 with a valid token outside the allowlist", async () => {
+  it("POST /session/start -> 403 with a valid token but no Membership (allowlist retired, Membership enforces this now)", async () => {
     verifyIdTokenMock.mockResolvedValue({ uid: "uid-x", email: "stranger@test.com" });
+    getUserMock.mockResolvedValue(null); // no AppUser record either
+    listMembershipsByUserMock.mockResolvedValue([]);
     const res = await request(buildApp())
       .post("/api/session/start")
       .set("Authorization", "Bearer good")
@@ -145,8 +188,8 @@ describe("sensitive routes require a valid, allowlisted token", () => {
     expect(res.status).toBe(403);
   });
 
-  it("POST /session/start -> 200 with a valid, allowlisted token", async () => {
-    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
+  it("POST /session/start -> 200 with a valid token and an active Membership", async () => {
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
     const res = await request(buildApp())
       .post("/api/session/start")
       .set("Authorization", "Bearer good")
@@ -161,64 +204,277 @@ describe("sensitive routes require a valid, allowlisted token", () => {
   });
 });
 
-describe("identity is derived from the verified token, never the body", () => {
+describe("Phase 3: session tenant ownership", () => {
+  it("persists organization_id from req.appContext, never from the body", async () => {
+    asSingleOrgUser("uid-1", "org-real", "SPOKESPERSON");
+    const startRes = await request(buildApp())
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic", organization_id: "org-attacker-supplied" });
+
+    expect(startRes.status).toBe(200);
+    const sessionId = startRes.body.session_id as string;
+    expect(sessionsStore.get(sessionId)?.organization_id).toBe("org-real");
+  });
+
   it("ignores a client-supplied user_id and rejects /session/end from a different uid", async () => {
     const app = buildApp();
 
     // Started by the real, token-verified uid "owner-uid" — the body tries
     // to claim a different identity ("spoofed-uid"), which must be ignored.
-    verifyIdTokenMock.mockResolvedValueOnce({ uid: "owner-uid", email: "allowed@test.com" });
+    asSingleOrgUser("owner-uid", "org-1", "SPOKESPERSON");
     const startRes = await request(app)
       .post("/api/session/start")
       .set("Authorization", "Bearer t1")
-      .send({
-        target_mode: "generic",
-        user_id: "spoofed-uid",
-        user_name: "Spoofed Name",
-      });
+      .send({ target_mode: "generic", user_id: "spoofed-uid", user_name: "Spoofed Name" });
     expect(startRes.status).toBe(200);
     const sessionId = startRes.body.session_id as string;
 
     // Ending the same session as the uid that was spoofed in the body
     // (not the real starter) must be rejected. If the server had trusted
     // body.user_id as the owner, this would incorrectly succeed.
-    verifyIdTokenMock.mockResolvedValueOnce({
-      uid: "spoofed-uid",
-      email: "other-allowed@test.com",
-    });
+    asSingleOrgUser("spoofed-uid", "org-1", "SPOKESPERSON");
     const endRes = await request(app)
       .post("/api/session/end")
       .set("Authorization", "Bearer t2")
       .send({
         session_id: sessionId,
-        target_mode: "generic",
         duration_seconds: 42,
         transcript: [{ role: "user", text: "hola" }],
       });
-    expect(endRes.status).toBe(403);
+    expect(endRes.status).toBe(404); // uniform not-found, see routes.ts
   });
 
   it("allows /session/end from the real starter uid", async () => {
     const app = buildApp();
 
-    verifyIdTokenMock.mockResolvedValueOnce({ uid: "owner-uid", email: "allowed@test.com" });
+    asSingleOrgUser("owner-uid", "org-1", "SPOKESPERSON");
     const startRes = await request(app)
       .post("/api/session/start")
       .set("Authorization", "Bearer t1")
       .send({ target_mode: "generic" });
     const sessionId = startRes.body.session_id as string;
 
-    verifyIdTokenMock.mockResolvedValueOnce({ uid: "owner-uid", email: "allowed@test.com" });
+    asSingleOrgUser("owner-uid", "org-1", "SPOKESPERSON");
     const endRes = await request(app)
       .post("/api/session/end")
       .set("Authorization", "Bearer t2")
       .send({
         session_id: sessionId,
-        target_mode: "generic",
         duration_seconds: 42,
         transcript: [{ role: "user", text: "hola" }],
       });
     expect(endRes.status).toBe(200);
+  });
+
+  it("/session/end for an unknown session_id -> 404 (never distinguishes from 'not yours')", async () => {
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const res = await request(buildApp())
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({
+        session_id: "does-not-exist",
+        duration_seconds: 10,
+        transcript: [{ role: "user", text: "hola" }],
+      });
+    expect(res.status).toBe(404);
+  });
+
+  it("/session/end without session_id -> 400", async () => {
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const res = await request(buildApp())
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({ duration_seconds: 10, transcript: [{ role: "user", text: "hola" }] });
+    expect(res.status).toBe(400);
+  });
+
+  it("CLIENT_ADMIN cannot end a SPOKESPERSON's session just by knowing its id (no ownership bypass by role)", async () => {
+    const app = buildApp();
+
+    asSingleOrgUser("spokesperson-uid", "org-1", "SPOKESPERSON");
+    const startRes = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    const sessionId = startRes.body.session_id as string;
+
+    asSingleOrgUser("admin-uid", "org-1", "CLIENT_ADMIN");
+    const endRes = await request(app)
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t2")
+      .send({
+        session_id: sessionId,
+        duration_seconds: 10,
+        transcript: [{ role: "user", text: "hola" }],
+      });
+    expect(endRes.status).toBe(404);
+  });
+});
+
+describe("Phase 3: GET /admin/sessions — RBAC + tenant scoping", () => {
+  it("SPOKESPERSON -> 403", async () => {
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const res = await request(buildApp())
+      .get("/api/admin/sessions")
+      .set("Authorization", "Bearer t1");
+    expect(res.status).toBe(403);
+  });
+
+  it("CLIENT_ADMIN lists only sessions from their own organization", async () => {
+    sessionsStore.set("s-a", { session_id: "s-a", organization_id: "org-a" });
+    sessionsStore.set("s-b", { session_id: "s-b", organization_id: "org-b" });
+
+    asSingleOrgUser("admin-a", "org-a", "CLIENT_ADMIN");
+    const res = await request(buildApp())
+      .get("/api/admin/sessions")
+      .set("Authorization", "Bearer t1");
+
+    expect(res.status).toBe(200);
+    expect(res.body.organization_id).toBe("org-a");
+    expect(res.body.sessions).toEqual([{ session_id: "s-a", organization_id: "org-a" }]);
+  });
+
+  it("COACH can read their organization's sessions (V1 policy: org-scoped, not per-assignment)", async () => {
+    sessionsStore.set("s-a", { session_id: "s-a", organization_id: "org-a" });
+    asSingleOrgUser("coach-a", "org-a", "COACH");
+    const res = await request(buildApp())
+      .get("/api/admin/sessions")
+      .set("Authorization", "Bearer t1");
+    expect(res.status).toBe(200);
+    expect(res.body.sessions).toHaveLength(1);
+  });
+
+  it("AGENCY_ADMIN with Membership in A and B can query both, one at a time", async () => {
+    sessionsStore.set("s-a", { session_id: "s-a", organization_id: "org-a" });
+    sessionsStore.set("s-b", { session_id: "s-b", organization_id: "org-b" });
+
+    verifyIdTokenMock.mockResolvedValue({ uid: "agency-uid", email: "agency@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([
+      membership({ id: "m-a", user_id: "agency-uid", organization_id: "org-a", role: "AGENCY_ADMIN" }),
+      membership({ id: "m-b", user_id: "agency-uid", organization_id: "org-b", role: "AGENCY_ADMIN" }),
+    ]);
+
+    const app = buildApp();
+    const resA = await request(app)
+      .get("/api/admin/sessions?organization_id=org-a")
+      .set("Authorization", "Bearer t1");
+    expect(resA.status).toBe(200);
+    expect(resA.body.sessions).toEqual([{ session_id: "s-a", organization_id: "org-a" }]);
+
+    const resB = await request(app)
+      .get("/api/admin/sessions?organization_id=org-b")
+      .set("Authorization", "Bearer t1");
+    expect(resB.status).toBe(200);
+    expect(resB.body.sessions).toEqual([{ session_id: "s-b", organization_id: "org-b" }]);
+  });
+
+  it("AGENCY_ADMIN with Membership in A and B, no ?organization_id -> 409 (never assumes 'all organizations')", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "agency-uid", email: "agency@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([
+      membership({ id: "m-a", user_id: "agency-uid", organization_id: "org-a", role: "AGENCY_ADMIN" }),
+      membership({ id: "m-b", user_id: "agency-uid", organization_id: "org-b", role: "AGENCY_ADMIN" }),
+    ]);
+
+    const res = await request(buildApp())
+      .get("/api/admin/sessions")
+      .set("Authorization", "Bearer t1");
+    expect(res.status).toBe(409);
+  });
+
+  it("AGENCY_ADMIN WITHOUT Membership in C cannot query org C", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "agency-uid", email: "agency@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([
+      membership({ id: "m-a", user_id: "agency-uid", organization_id: "org-a", role: "AGENCY_ADMIN" }),
+    ]);
+
+    const res = await request(buildApp())
+      .get("/api/admin/sessions?organization_id=org-c")
+      .set("Authorization", "Bearer t1");
+    expect(res.status).toBe(403);
+  });
+
+  it("a user sending organization_id for an org they don't belong to is rejected, never elevated", async () => {
+    asSingleOrgUser("uid-1", "org-a", "CLIENT_ADMIN");
+    const res = await request(buildApp())
+      .get("/api/admin/sessions?organization_id=org-b")
+      .set("Authorization", "Bearer t1");
+    expect(res.status).toBe(403);
+  });
+
+  it("Membership inactive -> no access to /admin/sessions", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "user@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([
+      membership({ organization_id: "org-1", role: "CLIENT_ADMIN", status: "inactive" }),
+    ]);
+    const res = await request(buildApp())
+      .get("/api/admin/sessions")
+      .set("Authorization", "Bearer t1");
+    expect(res.status).toBe(403);
+  });
+
+  it("Organization inactive -> no access to /admin/sessions", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "user@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([
+      membership({ organization_id: "org-deactivated", role: "CLIENT_ADMIN" }),
+    ]);
+    getOrganizationMock.mockResolvedValue({
+      id: "org-deactivated",
+      name: "x",
+      slug: "org-deactivated",
+      status: "inactive",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+    const res = await request(buildApp())
+      .get("/api/admin/sessions")
+      .set("Authorization", "Bearer t1");
+    expect(res.status).toBe(403);
+  });
+
+  it("AppUser inactive -> no access to /admin/sessions", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "user@test.com" });
+    getUserMock.mockResolvedValue({
+      uid: "uid-1",
+      email: "user@test.com",
+      display_name: null,
+      status: "inactive",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+    listMembershipsByUserMock.mockResolvedValue([membership({ organization_id: "org-1", role: "CLIENT_ADMIN" })]);
+    const res = await request(buildApp())
+      .get("/api/admin/sessions")
+      .set("Authorization", "Bearer t1");
+    expect(res.status).toBe(403);
+  });
+});
+
+describe("POST /metrics/analyze — requires Membership", () => {
+  it("401s without a token", async () => {
+    const res = await request(buildApp())
+      .post("/api/metrics/analyze")
+      .send({ transcript: [] });
+    expect(res.status).toBe(401);
+  });
+
+  it("403s a valid token with no Membership", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "uid-x", email: "stranger@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([]);
+    const res = await request(buildApp())
+      .post("/api/metrics/analyze")
+      .set("Authorization", "Bearer good")
+      .send({ transcript: [] });
+    expect(res.status).toBe(403);
+  });
+
+  it("200s for any role with a valid Membership", async () => {
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const res = await request(buildApp())
+      .post("/api/metrics/analyze")
+      .set("Authorization", "Bearer good")
+      .send({ transcript: [{ role: "user", text: "hola" }], duration_seconds: 5 });
+    expect(res.status).toBe(200);
   });
 });
 
@@ -228,7 +484,7 @@ describe("GET /me — Phase 2 server-resolved organization/role context", () => 
     expect(res.status).toBe(401);
   });
 
-  it("403s a valid, allowlisted token with no active Membership", async () => {
+  it("403s a valid token with no active Membership", async () => {
     verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
     listMembershipsByUserMock.mockResolvedValue([]);
 
@@ -251,10 +507,7 @@ describe("GET /me — Phase 2 server-resolved organization/role context", () => 
   });
 
   it("200s with the real organization/role for a known user with exactly one eligible Membership", async () => {
-    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
-    listMembershipsByUserMock.mockResolvedValue([
-      membership({ organization_id: "org-real", role: "CLIENT_ADMIN" }),
-    ]);
+    asSingleOrgUser("uid-1", "org-real", "CLIENT_ADMIN", "allowed@test.com");
 
     const res = await request(buildApp())
       .get("/api/me")
@@ -270,10 +523,7 @@ describe("GET /me — Phase 2 server-resolved organization/role context", () => 
   });
 
   it("ignores organization_id/role sent in the request body — the real Firestore values win", async () => {
-    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
-    listMembershipsByUserMock.mockResolvedValue([
-      membership({ organization_id: "org-real", role: "SPOKESPERSON" }),
-    ]);
+    asSingleOrgUser("uid-1", "org-real", "SPOKESPERSON", "allowed@test.com");
 
     // A GET normally carries no body, but nothing stops a client from
     // sending one — prove the handler never reads it for identity/context.

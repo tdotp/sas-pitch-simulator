@@ -30,16 +30,22 @@ export interface SessionRecord {
   started_at: string;
   ended_at?: string;
   duration_seconds?: number;
-  // Firebase uid that started the session. saveSessionStart persists the
-  // full SessionRecord (spread), so this field DOES end up in Firestore —
-  // it is not memory-only. However, the Phase 1 ownership check on
-  // /session/end reads it EXCLUSIVELY from the in-memory `sessions` Map in
-  // routes.ts, never from Firestore. That check is therefore still not
-  // durable (lost on process restart, doesn't work across instances) even
-  // though the underlying data is. A durable ownership check that reads
-  // this field back from Firestore is Phase 4 (session lifecycle), not
-  // implemented yet.
+  // Firebase uid that started the session. Used for the /session/end
+  // ownership check (Phase 3: starter uid === authenticated uid, checked
+  // against the PERSISTED record via repositories/sessions.ts, not an
+  // in-memory Map — durable across restarts/instances).
   owner_uid?: string;
+  // Tenant ownership (Phase 3): the Organization this session belongs to,
+  // taken exclusively from req.appContext.organizationId at /session/start
+  // — never from the client. Required for every session created from
+  // Phase 3 onward. Sessions written before Phase 3 (legacy Firestore
+  // docs) don't have it — repositories/sessions.ts treats a doc missing
+  // this field as invalid/not found rather than exposing it without a
+  // tenant (see LEGACY_SESSION_POLICY in
+  // PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md). Optional in the type only
+  // to reflect that Firestore reality, not because a newly created
+  // session may omit it.
+  organization_id?: string;
 }
 
 // ─────────────────────────────────────────────────────────────

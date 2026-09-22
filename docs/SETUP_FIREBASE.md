@@ -1,11 +1,14 @@
 # Configuración Firebase — paso a paso
 
-Firebase se usa para **persistencia** (sesiones, transcripts, métricas, scores) y, desde la Fase 1 de escalamiento, para **autenticación real** (Firebase Auth, email/password). La persistencia sigue **fuera del camino crítico** de la conversación: si Firestore no está listo, la app funciona igual (con `PERSISTENCE_DISABLED=true` o sin service account, loguea en consola). La autenticación sí es obligatoria: sin `VITE_FIREBASE_*` configuradas en el frontend y sin `AUTH_ALLOWED_EMAILS` en el backend, nadie puede entrar.
+Firebase se usa para **persistencia** (Organization/User/Membership/sesiones, transcripts, métricas, scores) y para **autenticación real** (Firebase Auth, email/password). La persistencia sigue **fuera del camino crítico** de la conversación en cuanto a resultados: si Firestore no está listo, la app funciona igual (con `PERSISTENCE_DISABLED=true` o sin service account, loguea en consola) — pero la autenticación y la autorización SÍ dependen de Firestore (Membership), así que sin él nadie puede usar ninguna ruta sensible. La autenticación es obligatoria: sin `VITE_FIREBASE_*` configuradas en el frontend, nadie puede entrar; sin un Firestore accesible, nadie puede pasar de "autenticado" a "autorizado" (ver Fase 3 abajo).
 
-> **Ya NO hay login hardcodeado.** Desde la Fase 1, el login usa Firebase Auth
-> (email/password) y el backend verifica un ID token real en cada request
-> sensible. Ver `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md` para el detalle
-> completo del flujo, sus tests y sus límites conocidos.
+> **Ya NO hay login hardcodeado.** El login usa Firebase Auth (email/password)
+> y el backend verifica un ID token real en cada request sensible (Fase 1),
+> y además exige una Membership activa en una Organization activa (Fase
+> 2/3) — ya no hay ninguna allowlist de correos en código ni en `.env`. Ver
+> `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md`,
+> `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md` y
+> `PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md`.
 
 ## 1. Crear proyecto
 
@@ -63,33 +66,40 @@ Necesaria para que el login (Firebase Auth) funcione.
    desde el frontend — no hay registro público. Cada persona recibe un
    enlace de restablecimiento de contraseña para definir la suya la primera
    vez.
-5. En `backend/.env`, define `AUTH_ALLOWED_EMAILS` con los correos exactos
-   que pueden entrar (ver sección siguiente).
+5. Eso solo los autentica. Para que puedan usar la app hace falta además
+   una Membership (ver sección siguiente) — sin eso, un login válido
+   igual da 403.
 
-## 5. Allowlist temporal de acceso (Fase 1, provisional)
+## 5. Acceso real: Organization + Membership (Fase 2/3, reemplaza la allowlist de Fase 1)
 
 Cualquiera con la `apiKey` pública del frontend puede **auto-registrarse**
 en Firebase Auth (es como funciona el proveedor email/password). Un token
-válido por sí solo NO implica que esa persona deba tener acceso. Por eso el
-backend exige además que el email esté en una lista explícita:
+válido por sí solo NO implica que esa persona deba tener acceso — por eso
+un usuario recién autenticado, sin más, siempre recibe 403 en cualquier
+ruta sensible. El acceso real lo da tener una **Membership activa** en una
+**Organization activa**, en Firestore (colecciones `organizations`,
+`users`, `memberships` — ver `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md`
+para el modelo completo). Para dar de alta a alguien:
 
 ```
-# backend/.env
-AUTH_ALLOWED_EMAILS=correo1@smartpr.com.co,correo2@smartpr.com.co
+npm run bootstrap:phase2-legacy-org --workspace=backend
 ```
 
-Vacío = nadie tiene acceso (falla cerrado). Esto es temporal: en las Fases
-2–3 (Organization/Membership) lo reemplaza un modelo de roles real.
+(o el patrón de ese script — `upsertOrganization` / `upsertUser` /
+`upsertMembership` desde `backend/src/repositories/`) — nunca una variable
+de entorno. La antigua `AUTH_ALLOWED_EMAILS` se retiró en Fase 3
+precisamente porque duplicaba este control con un sistema paralelo.
 
-## 5. Verificar
+## 6. Verificar
 
 Con el backend corriendo deberías ver en el log:
 
 ```
-[firebase] Inicializado. Persistencia activa.
+[firebase] Firebase Admin inicializado (Auth disponible).
+[firebase] Firestore listo. Persistencia activa.
 ```
 
-Y tras una práctica, un documento nuevo en la colección **`sessions`** con: `target_mode`, `duration_seconds`, `transcript`, `metrics`, `evaluation`.
+Y tras una práctica, un documento nuevo en la colección **`sessions`** con: `organization_id`, `target_mode`, `duration_seconds`, `transcript`, `metrics`, `evaluation`.
 
 ## Modelo de datos (colección `sessions`)
 
@@ -98,6 +108,7 @@ Y tras una práctica, un documento nuevo en la colección **`sessions`** con: `t
   "session_id": "uuid",
   "user_id": "<firebase uid, verificado server-side>",
   "user_name": "<email del usuario autenticado>",
+  "organization_id": "<de req.appContext, nunca del cliente — Fase 3>",
   "target_mode": "generic | davivienda | grupo_aval",
   "voice_gender": "male | female | random",
   "status": "in_progress | completed",

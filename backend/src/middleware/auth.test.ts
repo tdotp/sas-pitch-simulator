@@ -1,16 +1,11 @@
 // Unit tests for the requireAuth middleware, in isolation from Express and
-// from real Firebase (the ID-token verifier is injected). Covers the order
-// specified for Phase 1: Bearer -> verifyIdToken -> uid/email -> allowlist.
+// from real Firebase (the ID-token verifier is injected). Covers identity
+// verification only: Bearer -> verifyIdToken -> uid/email. Authorization
+// (allowlist through Phase 2, Membership/RBAC from Phase 3) is NOT this
+// middleware's job anymore — see auth.ts's history comment and
+// middleware/context.test.ts / middleware/roles.test.ts for that.
 import { describe, it, expect, vi } from "vitest";
 import type { Request, Response } from "express";
-
-vi.mock("../config.js", () => ({
-  config: {
-    apiSharedToken: "",
-    authAllowedEmails: ["allowed@test.com"],
-  },
-}));
-
 import { createRequireAuth } from "./auth.js";
 
 function mockReqRes(headers: Record<string, string> = {}) {
@@ -61,48 +56,27 @@ describe("requireAuth", () => {
     expect(next).not.toHaveBeenCalled();
   });
 
-  it("403s a valid token whose email is not in the allowlist", async () => {
-    const verify = vi.fn().mockResolvedValue({ uid: "uid-1", email: "stranger@test.com" });
+  it("calls next() and attaches req.auth for any valid token, regardless of email", async () => {
+    const verify = vi.fn().mockResolvedValue({ uid: "uid-1", email: "anyone@test.com" });
     const middleware = createRequireAuth(verify);
     const { req, res, status, next } = mockReqRes({ authorization: "Bearer good-token" });
 
     await middleware(req, res, next);
 
-    expect(status).toHaveBeenCalledWith(403);
-    expect(next).not.toHaveBeenCalled();
+    expect(status).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(req.auth).toEqual({ uid: "uid-1", email: "anyone@test.com" });
   });
 
-  it("403s a valid token with no email at all", async () => {
+  it("calls next() and attaches req.auth for a valid token with no email at all", async () => {
     const verify = vi.fn().mockResolvedValue({ uid: "uid-1", email: null });
     const middleware = createRequireAuth(verify);
     const { req, res, status, next } = mockReqRes({ authorization: "Bearer good-token" });
 
     await middleware(req, res, next);
 
-    expect(status).toHaveBeenCalledWith(403);
-    expect(next).not.toHaveBeenCalled();
-  });
-
-  it("calls next() and attaches req.auth for a valid, allowlisted token", async () => {
-    const verify = vi.fn().mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
-    const middleware = createRequireAuth(verify);
-    const { req, res, status, next } = mockReqRes({ authorization: "Bearer good-token" });
-
-    await middleware(req, res, next);
-
     expect(status).not.toHaveBeenCalled();
     expect(next).toHaveBeenCalledTimes(1);
-    expect(req.auth).toEqual({ uid: "uid-1", email: "allowed@test.com" });
-  });
-
-  it("allowlist match is case-insensitive on the email", async () => {
-    const verify = vi.fn().mockResolvedValue({ uid: "uid-1", email: "ALLOWED@test.com" });
-    const middleware = createRequireAuth(verify);
-    const { req, res, status, next } = mockReqRes({ authorization: "Bearer good-token" });
-
-    await middleware(req, res, next);
-
-    expect(status).not.toHaveBeenCalled();
-    expect(next).toHaveBeenCalledTimes(1);
+    expect(req.auth).toEqual({ uid: "uid-1", email: null });
   });
 });

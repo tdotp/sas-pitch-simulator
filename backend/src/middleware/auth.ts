@@ -1,18 +1,26 @@
-// Phase 1 real authentication: verifies the Firebase ID token sent as
-// `Authorization: Bearer <token>` and enforces a temporary email allowlist.
+// Real authentication: verifies the Firebase ID token sent as
+// `Authorization: Bearer <token>`.
 //
-// Order (per spec): Bearer present & well-formed -> verifyIdToken -> uid/email
-// verified -> allowlist check.
+// Order: Bearer present & well-formed -> verifyIdToken -> uid/email verified.
 //   - missing/malformed header, or an invalid/expired token -> 401
-//   - valid token but email not in AUTH_ALLOWED_EMAILS               -> 403
+//   - valid token -> next(), with req.auth = { uid, email }
 //
-// This is identity, not authorization/roles. Anything beyond "is this a
-// known, allowed person" (organizations, membership, RBAC) is out of scope
-// for this phase — see KNOWN_LIMITATIONS in PHASE_01_AUTH_IMPLEMENTATION_REPORT.md.
+// This is identity ONLY, never authorization. Whether this uid is actually
+// allowed to do anything is decided downstream by requireMembership
+// (Organization/Membership/Role — Phase 2) and requireAnyRole (Phase 3),
+// never here.
+//
+// HISTORY: through Phase 2, this middleware ALSO enforced a temporary
+// AUTH_ALLOWED_EMAILS allowlist (because Firebase's email/password provider
+// lets anyone with the public apiKey self-register, so a verified token
+// alone didn't imply access). Phase 3 retired that allowlist: every
+// sensitive route now requires requireMembership too, and a self-registered
+// stranger has no AppUser/Membership record, so they 403 there instead —
+// same protection, one system instead of two. See ALLOWLIST_DECISION in
+// PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md.
 
 import type { NextFunction, Request, Response } from "express";
 import admin from "firebase-admin";
-import { config } from "../config.js";
 
 export interface AuthContext {
   uid: string;
@@ -60,12 +68,6 @@ export function createRequireAuth(verifyIdToken: IdTokenVerifier = defaultVerifi
       decoded = await verifyIdToken(idToken);
     } catch {
       res.status(401).json({ error: "No autorizado" });
-      return;
-    }
-
-    const email = (decoded.email ?? "").toLowerCase();
-    if (!email || !config.authAllowedEmails.includes(email)) {
-      res.status(403).json({ error: "No tienes acceso a esta aplicación" });
       return;
     }
 

@@ -3,16 +3,25 @@
 Fecha: 19 de julio de 2026 (ver actualización del 22 de septiembre de 2026 más abajo).
 Repo: `/Users/gerardocalambasposada/Documents/Claude_/SAS` (sin remoto git, solo local).
 
-> **Actualización 22-sep-2026 — Fase 1 de escalamiento (auth real) implementada.**
-> Dos cosas de este documento ya NO son ciertas y quedan corregidas aquí:
+> **Actualización 22-sep-2026 — Fases 1-3 de escalamiento implementadas.**
+> Varias cosas de este documento ya NO son ciertas y quedan corregidas aquí:
 > 1. El repo **sí tiene remoto** ahora: `tdotp/sas-pitch-simulator` en GitHub
->    (privado).
+>    (visibilidad variable según necesidad de revisión — confirmar estado
+>    actual con `gh repo view`).
 > 2. El login **ya no es un gate de frontend con credenciales hardcoded**.
->    Es Firebase Auth (email/password) real, con el backend verificando el
->    ID token en cada request sensible, más una allowlist temporal de
->    correos (`AUTH_ALLOWED_EMAILS`) hasta que exista un modelo de roles
->    real. Detalle completo, tests y límites conocidos en
->    `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md`.
+>    Es Firebase Auth (email/password) real (Fase 1), y el acceso real lo
+>    da una **Membership activa en una Organization activa** en Firestore
+>    (Fase 2) — la allowlist temporal de correos (`AUTH_ALLOWED_EMAILS`)
+>    se **retiró en Fase 3**.
+> 3. **Ya existe tenant isolation y RBAC real** (Fase 3): las sesiones
+>    quedan vinculadas a una organización, `/admin/sessions` filtra por
+>    organización y rol (ya no expone todo a cualquiera), y hay roles
+>    (`AGENCY_ADMIN`/`CLIENT_ADMIN`/`COACH`/`SPOKESPERSON`).
+>
+> Detalle completo, tests y límites conocidos de cada fase en
+> `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md`,
+> `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md` y
+> `PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md`. Empieza por `START_HERE.md`.
 
 ## Qué es este proyecto
 
