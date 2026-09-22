@@ -21,6 +21,7 @@ import {
   saveSessionResult,
   saveSessionStart,
   listSessions,
+  isAuthReady,
 } from "./firebase.js";
 
 const VALID_TARGETS: TargetMode[] = ["generic", "davivienda", "grupo_aval"];
@@ -37,6 +38,11 @@ router.get("/health", (_req: Request, res: Response) => {
     ok: true,
     eleven_ready: assertElevenReady() === null,
     openrouter_ready: assertOpenRouterReady() === null,
+    // Firebase Admin initialized (i.e. admin.auth().verifyIdToken() can
+    // work). false here means every authenticated route will 401
+    // regardless of a valid ID token — surface it before it's a silent
+    // outage. Independent of Firestore/PERSISTENCE_DISABLED.
+    auth_ready: isAuthReady(),
     time: new Date().toISOString(),
   });
 });
@@ -89,12 +95,14 @@ router.post("/session/start", requireAuth, async (req: Request, res: Response) =
       voice_id: signed.voice_id,
       status: "in_progress",
       started_at: new Date().toISOString(),
-      // Not part of SessionRecord's public shape persisted downstream;
-      // kept only in the in-memory Map for the ownership check below.
+      // owner_uid IS persisted: saveSessionStart below spreads the full
+      // `session` object into Firestore. But the /session/end ownership
+      // check further down reads it only from the in-memory `sessions`
+      // Map, never from Firestore — see the comment there.
       owner_uid: auth.uid,
     };
     sessions.set(session.session_id, session);
-    void saveSessionStart(session); // fire-and-forget
+    void saveSessionStart(session); // fire-and-forget (persists owner_uid too)
 
     res.json({
       session_id: session.session_id,
@@ -138,11 +146,14 @@ router.post("/session/end", requireAuth, async (req: Request, res: Response) => 
   const stored = session_id ? sessions.get(session_id) : undefined;
 
   // Ownership check (Phase 1, temporary): if we still have the in-memory
-  // record for this session_id, only its starter may end it. This relies
-  // on the same non-durable `sessions` Map as /session/start — it is lost
-  // on process restart, so it is a protection, not a guarantee. Durable
-  // ownership (Firestore-backed) lands in Phase 4; this P0 stays open
-  // until then.
+  // record for this session_id, only its starter may end it. Note:
+  // owner_uid IS persisted to Firestore (saveSessionStart persists the
+  // whole record) — but this check reads it EXCLUSIVELY from the
+  // in-memory `sessions` Map below, never from Firestore. It relies on
+  // that same non-durable Map as /session/start — lost on process
+  // restart, doesn't work across instances — so it's a protection, not a
+  // guarantee. A durable check that reads owner_uid back from Firestore
+  // lands in Phase 4 (session lifecycle); this P0 stays open until then.
   if (stored?.owner_uid && stored.owner_uid !== req.auth!.uid) {
     return res.status(403).json({ error: "No tienes acceso a esta sesión" });
   }

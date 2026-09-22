@@ -10,9 +10,11 @@ export type RubricKey =
 
 export type VoiceGender = "male" | "female" | "random";
 
+// Phase 1: identity is NOT part of this request's contract. user_id/user_name
+// used to be client-supplied fields here; they're derived exclusively from
+// the verified Firebase ID token (see requireAuth + req.auth in routes.ts)
+// and must never come from the request body again.
 export interface StartSessionRequest {
-  user_id: string;
-  user_name: string;
   target_mode: TargetMode;
   voice_gender?: VoiceGender; // only meaningful for generic
 }
@@ -28,11 +30,15 @@ export interface SessionRecord {
   started_at: string;
   ended_at?: string;
   duration_seconds?: number;
-  // Firebase uid that started the session, used for the Phase 1 ownership
-  // check on /session/end. Lives only on the in-memory record (see the
-  // `sessions` Map in routes.ts) — NOT durable, lost on process restart.
-  // This is a temporary protection, not the real session lifecycle;
-  // superseded by durable, Firestore-backed session state in Phase 4.
+  // Firebase uid that started the session. saveSessionStart persists the
+  // full SessionRecord (spread), so this field DOES end up in Firestore —
+  // it is not memory-only. However, the Phase 1 ownership check on
+  // /session/end reads it EXCLUSIVELY from the in-memory `sessions` Map in
+  // routes.ts, never from Firestore. That check is therefore still not
+  // durable (lost on process restart, doesn't work across instances) even
+  // though the underlying data is. A durable ownership check that reads
+  // this field back from Firestore is Phase 4 (session lifecycle), not
+  // implemented yet.
   owner_uid?: string;
 }
 
