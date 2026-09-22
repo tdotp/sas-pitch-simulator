@@ -1,7 +1,7 @@
 # START HERE — SAS Pitch Simulator
 
 Pega este archivo (o dile al nuevo chat que lo lea) y podrá continuar sin leer
-el resto de la documentación. Última actualización: 20 de septiembre de 2026.
+el resto de la documentación. Última actualización: 22 de septiembre de 2026.
 
 ## 1. Qué es
 
@@ -10,17 +10,25 @@ practica un pitch hablando con un interlocutor C-level simulado y recibe un
 reporte de evaluación con IA. 3 escenarios: **genérico, Davivienda, Grupo Aval**.
 
 Repo local: `/Users/gerardocalambasposada/Documents/Claude_/SAS` (monorepo npm
-workspaces: `backend/`, `frontend/`). **No tiene remoto git** — vive solo en
-esta máquina.
+workspaces: `backend/`, `frontend/`). Remoto: `tdotp/sas-pitch-simulator` en
+GitHub (**privado** — contiene correos y prompts propios de SAS).
 
-## 2. Estado (verificado el 20-sep-2026)
+## 2. Estado (verificado el 22-sep-2026)
 
-- En producción y respondiendo (HTTP 200 ambos):
+- **Fase 1 de escalamiento (auth real) implementada y NO desplegada
+  todavía.** Login/logout/reset con Firebase Auth real, backend verifica
+  ID token + allowlist. Ver `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md` para
+  el detalle completo (qué cambió, tests, limitaciones, SHA).
+- Producción sigue corriendo la versión **anterior** (login hardcoded, sin
+  auth real) hasta que se apruebe y despliegue la Fase 1:
   - Frontend: https://smartpr-pitch-agent.web.app (Firebase Hosting)
   - Backend: https://185-215-180-182.nip.io (VPS, Docker + Caddy, HTTPS vía nip.io)
-- Repo limpio; último commit `dcdb256`. Sin cambios pendientes salvo el reporte
-  de escalamiento (sin commitear) y un `.zip` de descarga que se ignora a propósito.
-- Firestore: 68 sesiones de prueba (16 completas, 51 abandonadas).
+- El código de Fase 1 pasa build y tests localmente (backend + frontend),
+  pero **no se ha hecho `firebase deploy` ni redeploy del VPS** con estos
+  cambios — desplegar sin antes crear/avisar a los usuarios los dejaría
+  fuera.
+- Firestore: 68 sesiones de prueba (16 completas, 51 abandonadas), de antes
+  de esta fase.
 
 ## 3. Arquitectura en 6 líneas
 
@@ -55,6 +63,17 @@ signed URL al inicio (`POST /session/start`) y evalúa al final (`POST /session/
 
 ## 5. Decisiones y comportamientos que NO son obvios
 
+- **Auth (desde Fase 1, 22-sep-2026)**: Firebase Auth real (email/password).
+  El backend verifica el ID token (`Authorization: Bearer`) y además exige
+  que el email esté en `AUTH_ALLOWED_EMAILS` (allowlist temporal — el
+  proveedor email/password permite auto-registro, así que un token válido
+  por sí solo no basta). Token inválido → 401; token válido pero no
+  permitido → 403. El frontend reintenta una sola vez con token refrescado
+  ante un 401; nunca reintenta ante un 403. No hay signup en el frontend —
+  las cuentas se crean con Admin SDK. `/admin/sessions` sigue siendo un P0
+  abierto: cualquier usuario autenticado y permitido puede leer todas las
+  sesiones (no hay roles todavía). Detalle completo en
+  `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md`.
 - **Repreguntas**: exactamente 2. La 1ª textual de una lista fija; la 2ª de la
   misma lista pero anclada a lo que la persona respondió. Lo aplica el prompt (el
   LLM de ElevenLabs), no hay enforcement en código.
@@ -68,7 +87,8 @@ signed URL al inicio (`POST /session/start`) y evalúa al final (`POST /session/
 - **Mobile**: layout responsive ya integrado; en la conversación mobile se oculta
   el texto de la pregunta del agente (solo orbe + estado + timer).
 - **Paleta**: vino/crema de marca (NO el azul del paquete de diseño de referencia).
-- **Login**: es un gate de frontend, sin autenticación real (ver riesgos).
+- **Login**: Firebase Auth real desde Fase 1 (ver arriba). Ya no es un gate
+  de frontend con credenciales hardcoded.
 - **VPS compartido** con `n8n` y `aleja-app`: no tocarlos; el backend vive en su
   propia red Docker (`sas-pitch-simulator-net`). Verificar `docker ps` antes/después
   de cualquier cambio.
@@ -85,6 +105,10 @@ signed URL al inicio (`POST /session/start`) y evalúa al final (`POST /session/
 # Local
 npm run dev:backend      # :8080
 npm run dev:frontend     # :5173 (proxy /api → :8080)
+
+# Tests + build (correr antes de cualquier deploy)
+npm test                 # backend (vitest) + frontend (vitest)
+npm run build             # backend (tsc) + frontend (tsc + vite build)
 
 # Deploy frontend
 npm run build --workspace=frontend && firebase deploy --only hosting
@@ -103,41 +127,53 @@ curl -s https://185-215-180-182.nip.io/api/health
 **Las credenciales reales NO están en este archivo.** Están en `ACCESOS.md`
 (misma carpeta, gitignored): llaves ElevenLabs/OpenRouter, `.env` completo, acceso
 SSH al VPS (`ssh sas-vps`, usuario `sasdeploy`, llave `~/.ssh/id_ed25519_sas`),
-Firebase (proyecto `smartpr-pitch-agent`), y los 4 logins de la app.
+Firebase (proyecto `smartpr-pitch-agent`), y el estado de las 4 cuentas de
+login de la app (Firebase Auth real desde Fase 1 — ya no son contraseñas
+fijas en código).
 Si trabajas desde otra máquina, copia esas llaves como archivos (no como texto).
 
 ## 8. Riesgos y deuda conocida (resumen del reporte de escalamiento)
 
-Preparación multi-cliente: **LOW**. Lo crítico (P0):
-- No existe el concepto de organización/tenant en ningún lado.
-- No hay autenticación real (login solo en el navegador, 4 usuarios en el bundle público).
+Preparación multi-cliente: **LOW** (evaluación previa a Fase 1). Lo crítico (P0):
+- No existe el concepto de organización/tenant en ningún lado. **Abierto.**
+- ~~No hay autenticación real...~~ **Resuelto en Fase 1** (22-sep-2026):
+  Firebase Auth + verificación de ID token server-side + allowlist temporal.
+  Ver `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md`.
 - `GET /admin/sessions` devuelve sesiones de todos sin control de acceso.
+  **Sigue abierto** — ahora exige login válido y permitido, pero no hay
+  roles: cualquier usuario allowlisted puede leer todas las sesiones.
 - Estado de sesión en un `Map` en memoria del proceso (se pierde al reiniciar).
+  **Sigue abierto** — la Fase 1 agregó un chequeo de ownership sobre ese
+  mismo `Map` (protección temporal, no durable); la solución real
+  (Firestore-backed) es Fase 4.
 
 Otros (P1): sin instrumentación de latencia, rate-limit por IP (puede bloquear a
 una oficina entera), persistencia fire-and-forget sin reintentos, sin timeouts ni
 retries hacia ElevenLabs/OpenRouter, prompts/rúbricas hardcoded (cliente nuevo =
 código + deploy).
 
-Recomendación: NO migrar a Postgres (Firestore alcanza). Primer paso si se escala:
-modelo `Organization/Membership` + Firebase Auth real. Estimación: ~48–74
-días-dev (~12–17 semanas con 1 dev). Detalle completo en
-`SPOKESPERSON_TRAINING_SCALING_REPORT.md`.
+Recomendación: NO migrar a Postgres (Firestore alcanza). Con Fase 1 ya
+implementada, el siguiente paso es Fase 2 (`Organization/Membership` +
+roles). Estimación original: ~48–74 días-dev (~12–17 semanas con 1 dev).
+Detalle completo en `SPOKESPERSON_TRAINING_SCALING_REPORT.md` y
+`PLAN_TRABAJO_ESCALAMIENTO_MULTI_CLIENTE.md`.
 
 ## 9. Pendientes sugeridos
 
-1. Probar los 3 escenarios completos (no solo el genérico) con usuarios reales y
+1. **Revisar y aprobar `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md`, y luego
+   desplegar Fase 1** (frontend a Firebase Hosting, backend al VPS) — hoy
+   solo está implementada y testeada localmente.
+2. Probar los 3 escenarios completos (no solo el genérico) con usuarios reales y
    confirmar que el cierre a los 3s de silencio se siente natural en un celular
    con conversación de voz real.
-2. Decidir si se avanza a multi-cliente (ver sección 8) o se mantiene como
-   herramienta interna.
-3. Crear un repo remoto privado (GitHub) — hoy el código no tiene respaldo fuera
-   de esta máquina.
+3. Decidir si se avanza a Fase 2 (Organization/Membership/roles) o se
+   mantiene como herramienta interna de un solo equipo.
 4. Considerar dominio propio para el backend (hoy `nip.io`).
 
 ## 10. Documentos existentes (solo si necesitas más detalle)
 
 `report.md` (avance), `HANDOFF.md` (contexto de sesión previa),
 `SPOKESPERSON_TRAINING_SCALING_REPORT.md` (análisis multi-cliente),
-`ACCESOS.md` (credenciales, no versionado), `git log` (historial con mensajes
-detallados de cada cambio).
+`PHASE_01_AUTH_IMPLEMENTATION_REPORT.md` (auth real: qué cambió, tests,
+limitaciones — 22-sep-2026), `ACCESOS.md` (credenciales, no versionado),
+`git log` (historial con mensajes detallados de cada cambio).

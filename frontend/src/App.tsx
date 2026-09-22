@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useAuth } from "./auth";
 import { Login } from "./components/Login";
 import { ScenarioSelect } from "./components/ScenarioSelect";
 import { Preparation } from "./components/Preparation";
@@ -16,7 +17,6 @@ import type {
 } from "./types";
 
 type Stage =
-  | "login"
   | "select"
   | "preparation"
   | "session"
@@ -30,7 +30,8 @@ function labelFor(target: TargetId): string {
 }
 
 export default function App() {
-  const [stage, setStage] = useState<Stage>("login");
+  const { user, loading, logout } = useAuth();
+  const [stage, setStage] = useState<Stage>("select");
   const [session, setSession] = useState<StartSessionResponse | null>(null);
   const [starting, setStarting] = useState(false);
   const [prepError, setPrepError] = useState("");
@@ -121,15 +122,32 @@ export default function App() {
     setStage("select");
   }
 
-  switch (stage) {
-    case "login":
-      return <Login onLogin={() => setStage("select")} />;
+  // Auth gate: while the initial Firebase Auth state is being restored,
+  // show nothing disruptive; once known, an unauthenticated user only ever
+  // sees Login, regardless of `stage`.
+  if (loading) {
+    return (
+      <section className="screen screen--processing">
+        <div className="processing-content">
+          <div className="processing-mark" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
+        </div>
+      </section>
+    );
+  }
+  if (!user) {
+    return <Login />;
+  }
 
+  switch (stage) {
     case "select":
       return (
         <>
           {envWarning && <div className="env-banner">⚠️ {envWarning}</div>}
-          <ScenarioSelect onContinue={prepare} />
+          <ScenarioSelect onContinue={prepare} onLogout={logout} />
         </>
       );
 

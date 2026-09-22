@@ -6,17 +6,6 @@ export const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 // backend's API_SHARED_TOKEN. Not a real secret (see backend/src/routes.ts).
 export const API_TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
 
-// MVP access gate — a frontend-only check, not real authentication.
-// These credentials are visible in the built JS bundle to anyone who opens
-// devtools; this is acceptable for an internal single-team tool but should
-// not be treated as a security boundary.
-export const APP_USERS: Array<{ user: string; password: string }> = [
-  { user: "gerardo.calambas@smartpr.com.co", password: "memobox1810" },
-  { user: "daniel.espana@smartpr.com.co", password: "123456" },
-  { user: "fabian.motta@smartpr.com.co", password: "123456" },
-  { user: "juan.motta@smartpr.com.co", password: "123456" },
-];
-
 export const TIMER = {
   idealSeconds: 90,
   maxSeconds: 180,

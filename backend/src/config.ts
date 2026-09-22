@@ -50,7 +50,19 @@ export const config = {
   // secret (it ships inside the public JS bundle) — it only raises the bar
   // above "anyone who finds the bare backend URL", combined with the
   // rate-limiter below. If unset, the check is skipped (local dev default).
+  // It is anti-abuse only — never treat it as authentication.
   apiSharedToken: req("API_SHARED_TOKEN"),
+
+  // TEMPORARY allowlist (Phase 1 auth). Firebase Auth's email/password
+  // provider lets anyone with the public web apiKey self-register, so
+  // verifying the ID token alone is not enough to gate access. Until
+  // Organization/Membership (Phase 2) replaces this, only these exact
+  // emails may use the app after authenticating. Comma-separated, case
+  // -insensitive. Empty means nobody is allowed (fail closed).
+  authAllowedEmails: (process.env.AUTH_ALLOWED_EMAILS ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
 } as const;
 
 export function assertElevenReady(): string | null {

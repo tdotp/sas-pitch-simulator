@@ -5,9 +5,11 @@ import type { VoiceGender } from "../types";
 export function ScenarioSelect({
   onContinue,
   error,
+  onLogout,
 }: {
   onContinue: (target: TargetId, voice: VoiceGender) => void;
   error?: string;
+  onLogout?: () => void;
 }) {
   const [selected, setSelected] = useState<TargetId>("generic");
   const [voice, setVoice] = useState<VoiceGender>("random");
@@ -16,8 +18,13 @@ export function ScenarioSelect({
 
   return (
     <section className="screen screen--selection">
-      <header className="brand-header">
+      <header className="brand-header" style={{ justifyContent: "space-between", display: "flex", alignItems: "center" }}>
         <img className="brand-logo" src="/assets/SmartPR_Logo.svg" alt="SmartPR" />
+        {onLogout && (
+          <button type="button" className="text-button" onClick={onLogout}>
+            Cerrar sesión
+          </button>
+        )}
       </header>
 
       <div className="selection-content">

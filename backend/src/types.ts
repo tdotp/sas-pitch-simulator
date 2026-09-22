@@ -28,6 +28,12 @@ export interface SessionRecord {
   started_at: string;
   ended_at?: string;
   duration_seconds?: number;
+  // Firebase uid that started the session, used for the Phase 1 ownership
+  // check on /session/end. Lives only on the in-memory record (see the
+  // `sessions` Map in routes.ts) — NOT durable, lost on process restart.
+  // This is a temporary protection, not the real session lifecycle;
+  // superseded by durable, Firestore-backed session state in Phase 4.
+  owner_uid?: string;
 }
 
 // Transcript turn as delivered by ElevenLabs (or built client-side).

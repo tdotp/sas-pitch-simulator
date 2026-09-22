@@ -1,4 +1,5 @@
 import { API_BASE, API_TOKEN } from "./config";
+import { auth } from "./firebase";
 import type {
   EndSessionResponse,
   StartSessionResponse,
@@ -7,15 +8,35 @@ import type {
   VoiceGender,
 } from "./types";
 
-async function post<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+async function getAuthHeader(forceRefresh = false): Promise<Record<string, string>> {
+  const user = auth.currentUser;
+  if (!user) return {};
+  const token = await user.getIdToken(forceRefresh);
+  return { Authorization: `Bearer ${token}` };
+}
+
+async function doFetch(path: string, body: unknown, forceRefresh: boolean) {
+  return fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...(API_TOKEN ? { "x-app-token": API_TOKEN } : {}),
+      ...(await getAuthHeader(forceRefresh)),
     },
     body: JSON.stringify(body),
   });
+}
+
+async function post<T>(path: string, body: unknown): Promise<T> {
+  let res = await doFetch(path, body, false);
+
+  // A 401 means the token was missing/invalid/expired — refresh it once
+  // (force) and retry. A 403 means the token was valid but the account
+  // isn't allowlisted: refreshing won't change that, so never retry on 403.
+  if (res.status === 401) {
+    res = await doFetch(path, body, true);
+  }
+
   if (!res.ok) {
     let msg = `Error ${res.status}`;
     try {
@@ -32,8 +53,6 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 export function startSession(params: {
   target_mode: TargetMode;
   voice_gender?: VoiceGender;
-  user_id?: string;
-  user_name?: string;
 }): Promise<StartSessionResponse> {
   return post<StartSessionResponse>("/session/start", params);
 }

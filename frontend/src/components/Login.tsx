@@ -1,23 +1,50 @@
 import { useState } from "react";
-import { APP_USERS } from "../config";
+import { useAuth, authErrorMessage } from "../auth";
 
-export function Login({ onLogin }: { onLogin: () => void }) {
+export function Login() {
+  const { login, resetPassword } = useAuth();
   const [user, setUser] = useState("");
   const [pass, setPass] = useState("");
   const [showPass, setShowPass] = useState(false);
   const [err, setErr] = useState("");
+  const [info, setInfo] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
-    const match = APP_USERS.some(
-      (u) =>
-        u.user.trim().toLowerCase() === user.trim().toLowerCase() &&
-        u.password === pass
-    );
-    if (match) {
-      onLogin();
-    } else {
-      setErr("Usuario o contraseña incorrectos.");
+    setErr("");
+    setInfo("");
+    if (!user.trim() || !pass) {
+      setErr("Ingresa tu correo y contraseña.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await login(user, pass);
+      // onAuthStateChanged (in AuthProvider) picks up the signed-in user;
+      // App.tsx reacts to that and moves past this screen.
+    } catch (e) {
+      setErr(authErrorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleForgotPassword() {
+    setErr("");
+    setInfo("");
+    if (!user.trim()) {
+      setErr("Escribe tu correo arriba y vuelve a intentar.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await resetPassword(user);
+      setInfo("Si el correo existe, te enviamos un enlace para restablecer la contraseña.");
+    } catch (e) {
+      setErr(authErrorMessage(e));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -79,11 +106,17 @@ export function Login({ onLogin }: { onLogin: () => void }) {
               </svg>
             </button>
           </label>
-          <button className="primary-button primary-button--wide" type="submit">
-            Ingresar
+          <button className="primary-button primary-button--wide" type="submit" disabled={busy}>
+            {busy ? "Ingresando…" : "Ingresar"}
           </button>
           {err && <div className="error-text">{err}</div>}
-          <button className="text-button" type="button">
+          {info && <div className="error-text" style={{ color: "inherit" }}>{info}</div>}
+          <button
+            className="text-button"
+            type="button"
+            onClick={handleForgotPassword}
+            disabled={busy}
+          >
             ¿Olvidaste tu contraseña?
           </button>
         </form>

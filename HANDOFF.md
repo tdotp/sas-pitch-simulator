@@ -1,7 +1,18 @@
 # Handoff — SAS Pitch Simulator
 
-Fecha: 19 de julio de 2026.
+Fecha: 19 de julio de 2026 (ver actualización del 22 de septiembre de 2026 más abajo).
 Repo: `/Users/gerardocalambasposada/Documents/Claude_/SAS` (sin remoto git, solo local).
+
+> **Actualización 22-sep-2026 — Fase 1 de escalamiento (auth real) implementada.**
+> Dos cosas de este documento ya NO son ciertas y quedan corregidas aquí:
+> 1. El repo **sí tiene remoto** ahora: `tdotp/sas-pitch-simulator` en GitHub
+>    (privado).
+> 2. El login **ya no es un gate de frontend con credenciales hardcoded**.
+>    Es Firebase Auth (email/password) real, con el backend verificando el
+>    ID token en cada request sensible, más una allowlist temporal de
+>    correos (`AUTH_ALLOWED_EMAILS`) hasta que exista un modelo de roles
+>    real. Detalle completo, tests y límites conocidos en
+>    `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md`.
 
 ## Qué es este proyecto
 
@@ -60,11 +71,10 @@ Todo lo pedido en esta conversación está hecho, verificado y desplegado:
   IP) para conseguir HTTPS real vía Let's Encrypt sin configurar DNS. Es una
   solución deliberada por tiempo, no un descuido — considerar un dominio
   real más adelante si se quiere ver más profesional.
-- El login de la app es un gate del lado del frontend únicamente (no hay
-  autenticación real de servidor) — las credenciales viven en código fuente
-  (`frontend/src/config.ts`), visibles en el bundle JS público. Es
-  aceptable para esta herramienta interna de equipo chico, pero no debe
-  tratarse como frontera de seguridad real.
+- ~~El login de la app es un gate del lado del frontend únicamente...~~
+  **Ya no.** Desde la Fase 1 (22-sep-2026) es Firebase Auth real con
+  verificación de token en el backend. Ver la nota de actualización al
+  inicio de este documento.
 - El backend tiene un token compartido + rate limit (20 req/min por IP)
   como protección básica contra abuso de la URL pública — no es un secreto
   real (viaja en el bundle del frontend), es solo una barrera contra

@@ -7,6 +7,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import rateLimit from "express-rate-limit";
 import { randomUUID } from "node:crypto";
 import { assertElevenReady, assertOpenRouterReady, config } from "./config.js";
+import { requireAuth } from "./middleware/auth.js";
 import type {
   SessionRecord,
   StartSessionRequest,
@@ -62,7 +63,7 @@ const limiter = rateLimit({
 router.use(requireToken, limiter);
 
 // ── FAST LANE ─────────────────────────────────────────────
-router.post("/session/start", async (req: Request, res: Response) => {
+router.post("/session/start", requireAuth, async (req: Request, res: Response) => {
   const elevenErr = assertElevenReady();
   if (elevenErr) return res.status(503).json({ error: elevenErr });
 
@@ -74,17 +75,23 @@ router.post("/session/start", async (req: Request, res: Response) => {
       .json({ error: `target_mode inválido. Usa: ${VALID_TARGETS.join(", ")}` });
   }
 
+  // Identity comes ONLY from the verified token — never from the request
+  // body. `user_id`/`user_name` sent by the client are ignored.
+  const auth = req.auth!;
   try {
     const signed = await getSignedUrl(target, body.voice_gender);
     const session: SessionRecord = {
       session_id: randomUUID(),
-      user_id: body.user_id ?? "sandra_hernandez",
-      user_name: body.user_name ?? "Sandra Hernández",
+      user_id: auth.uid,
+      user_name: auth.email ?? auth.uid,
       target_mode: target,
       voice_gender: signed.voice_gender,
       voice_id: signed.voice_id,
       status: "in_progress",
       started_at: new Date().toISOString(),
+      // Not part of SessionRecord's public shape persisted downstream;
+      // kept only in the in-memory Map for the ownership check below.
+      owner_uid: auth.uid,
     };
     sessions.set(session.session_id, session);
     void saveSessionStart(session); // fire-and-forget
@@ -105,7 +112,7 @@ router.post("/session/start", async (req: Request, res: Response) => {
 });
 
 // ── SLOW LANE ─────────────────────────────────────────────
-router.post("/session/end", async (req: Request, res: Response) => {
+router.post("/session/end", requireAuth, async (req: Request, res: Response) => {
   const orErr = assertOpenRouterReady();
   if (orErr) return res.status(503).json({ error: orErr });
 
@@ -129,6 +136,17 @@ router.post("/session/end", async (req: Request, res: Response) => {
     : 0;
 
   const stored = session_id ? sessions.get(session_id) : undefined;
+
+  // Ownership check (Phase 1, temporary): if we still have the in-memory
+  // record for this session_id, only its starter may end it. This relies
+  // on the same non-durable `sessions` Map as /session/start — it is lost
+  // on process restart, so it is a protection, not a guarantee. Durable
+  // ownership (Firestore-backed) lands in Phase 4; this P0 stays open
+  // until then.
+  if (stored?.owner_uid && stored.owner_uid !== req.auth!.uid) {
+    return res.status(403).json({ error: "No tienes acceso a esta sesión" });
+  }
+
   const target: TargetMode =
     stored?.target_mode ??
     (bodyTarget && VALID_TARGETS.includes(bodyTarget) ? bodyTarget : "generic");
@@ -167,7 +185,7 @@ router.post("/session/end", async (req: Request, res: Response) => {
 });
 
 // Debug: metrics only (no LLM).
-router.post("/metrics/analyze", (req: Request, res: Response) => {
+router.post("/metrics/analyze", requireAuth, (req: Request, res: Response) => {
   const { transcript, duration_seconds } = req.body as {
     transcript?: TranscriptTurn[];
     duration_seconds?: number;
@@ -178,7 +196,12 @@ router.post("/metrics/analyze", (req: Request, res: Response) => {
   res.json(computeMetrics(transcript, Number(duration_seconds) || 0));
 });
 
-router.get("/admin/sessions", async (_req: Request, res: Response) => {
+// KNOWN_LIMITATION / OPEN_P0 (Phase 1): this route only requires a valid,
+// allowlisted user — it is NOT scoped by role or ownership, so any allowed
+// user can read every session (all transcripts, all scores) via this
+// endpoint. Real RBAC lands in Phases 2–3 (Organization/Membership). Do not
+// treat this as fixed.
+router.get("/admin/sessions", requireAuth, async (_req: Request, res: Response) => {
   try {
     res.json({ sessions: await listSessions() });
   } catch (err) {
