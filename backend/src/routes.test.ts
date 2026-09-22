@@ -42,27 +42,83 @@ vi.mock("./services/elevenlabs.js", () => ({
   })),
 }));
 
+const evaluatePitchMock = vi.fn(async () => ({
+  session_id: "evaluated",
+  target_mode: "generic",
+  overall_score: 5,
+}));
 vi.mock("./services/evaluator.js", () => ({
-  evaluatePitch: vi.fn(async () => ({
-    session_id: "evaluated",
-    overall_score: 5,
-  })),
+  evaluatePitch: (...args: unknown[]) => evaluatePitchMock(...args),
 }));
 
 vi.mock("./firebase.js", () => ({
   isAuthReady: vi.fn(() => true),
 }));
 
-// Phase 3: sessions are persisted/read through this repository instead of
-// an in-memory Map. Mocked so these tests never touch real Firestore —
-// each test controls exactly what "exists" via an in-memory fake.
+// Phase 4: a small, purpose-built in-memory fake of the session lifecycle
+// repository. Its state-machine LOGIC (claim/concurrency/idempotency) is
+// verified thoroughly against the real repository in
+// repositories/sessions.test.ts — this fake exists so routes.test.ts can
+// test /session/end's ORCHESTRATION (which repository calls happen, in
+// what order, mapped to which HTTP status) with full control over each
+// outcome, including injecting a persistence failure on demand.
 const sessionsStore = new Map<string, Record<string, unknown>>();
+let persistCompletedResultShouldFail = false;
+
 vi.mock("./repositories/sessions.js", () => ({
   createSession: vi.fn(async (session: Record<string, unknown>) => {
-    sessionsStore.set(session.session_id as string, session);
+    sessionsStore.set(session.session_id as string, { ...session, updated_at: new Date().toISOString() });
   }),
-  getSessionById: vi.fn(async (id: string) => sessionsStore.get(id) ?? null),
-  completeSession: vi.fn(async () => {}),
+  claimSessionForEvaluation: vi.fn(
+    async (params: { sessionId: string; ownerUid: string; organizationId: string }) => {
+      const session = sessionsStore.get(params.sessionId);
+      if (!session || session.owner_uid !== params.ownerUid || session.organization_id !== params.organizationId) {
+        return { outcome: "not_found" as const };
+      }
+      if (session.status === "completed") return { outcome: "already_completed" as const, session };
+      if (session.status === "evaluating") return { outcome: "in_progress_elsewhere" as const };
+      if (
+        session.status === "in_progress" ||
+        session.status === "evaluation_failed" ||
+        session.status === "persistence_failed"
+      ) {
+        const claimed = { ...session, status: "evaluating" as const };
+        sessionsStore.set(params.sessionId, claimed);
+        return { outcome: "claimed" as const, session: claimed };
+      }
+      return { outcome: "wrong_state" as const, status: session.status };
+    }
+  ),
+  markEvaluationFailed: vi.fn(async (sessionId: string, reason: string) => {
+    const s = sessionsStore.get(sessionId);
+    if (s) sessionsStore.set(sessionId, { ...s, status: "evaluation_failed", failure_reason: reason });
+  }),
+  markPersistenceFailed: vi.fn(async (sessionId: string, reason: string) => {
+    const s = sessionsStore.get(sessionId);
+    if (s) sessionsStore.set(sessionId, { ...s, status: "persistence_failed", failure_reason: reason });
+  }),
+  persistCompletedResult: vi.fn(
+    async (
+      sessionId: string,
+      params: { duration_seconds: number; transcript: unknown; metrics: unknown; evaluation: unknown }
+    ) => {
+      if (persistCompletedResultShouldFail) {
+        throw new Error("simulated Firestore write failure");
+      }
+      const s = sessionsStore.get(sessionId);
+      if (s) {
+        sessionsStore.set(sessionId, {
+          ...s,
+          status: "completed",
+          duration_seconds: params.duration_seconds,
+          metrics: params.metrics,
+          evaluation: params.evaluation,
+          transcript: { full: "...", user_only: "...", agent_only: "..." },
+          ended_at: new Date().toISOString(),
+        });
+      }
+    }
+  ),
   listSessionsByOrganization: vi.fn(async (organizationId: string) =>
     [...sessionsStore.values()].filter((s) => s.organization_id === organizationId)
   ),
@@ -104,6 +160,13 @@ beforeEach(() => {
   getUserMock.mockReset();
   getOrganizationMock.mockReset();
   sessionsStore.clear();
+  persistCompletedResultShouldFail = false;
+  evaluatePitchMock.mockReset();
+  evaluatePitchMock.mockResolvedValue({
+    session_id: "evaluated",
+    target_mode: "generic",
+    overall_score: 5,
+  });
   // Sane defaults: an active AppUser, and any organization looked up
   // comes back active. Individual tests override these to exercise the
   // inactive-user/inactive-org paths.
@@ -365,6 +428,202 @@ describe("Phase 3: session tenant ownership", () => {
         transcript: [{ role: "user", text: "hola" }],
       });
     expect(endRes.status).toBe(200);
+  });
+});
+
+describe("Phase 4: session lifecycle", () => {
+  it("/session/start creates the session in the correct initial state", async () => {
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const res = await request(buildApp())
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+
+    expect(res.status).toBe(200);
+    const stored = sessionsStore.get(res.body.session_id);
+    expect(stored?.status).toBe("in_progress");
+    expect(stored?.organization_id).toBe("org-1");
+    expect(stored?.owner_uid).toBe("uid-1");
+  });
+
+  it("/session/end takes a session from in_progress -> evaluating -> completed, with transcript+metrics+evaluation persisted", async () => {
+    const app = buildApp();
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const startRes = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    const sessionId = startRes.body.session_id as string;
+    expect(sessionsStore.get(sessionId)?.status).toBe("in_progress");
+
+    const endRes = await request(app)
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({
+        session_id: sessionId,
+        duration_seconds: 42,
+        transcript: [{ role: "user", text: "hola" }],
+      });
+
+    expect(endRes.status).toBe(200);
+    const stored = sessionsStore.get(sessionId);
+    expect(stored?.status).toBe("completed");
+    expect(stored?.metrics).toBeTruthy();
+    expect(stored?.evaluation).toBeTruthy();
+    expect(stored?.transcript).toBeTruthy();
+  });
+
+  it("two concurrent /session/end calls for the same session: only one evaluation runs", async () => {
+    const app = buildApp();
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const startRes = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    const sessionId = startRes.body.session_id as string;
+
+    // The evaluator normally resolves near-instantly when mocked, which
+    // leaves no real window for a second request to arrive while the
+    // first is still "evaluating" — a genuinely concurrent HTTP race
+    // needs a small artificial delay here to be reliably exercised at
+    // all (without it, request A can fully finish — claim, evaluate,
+    // persist, respond — before request B's handler even starts, and
+    // B would hit the idempotent "already_completed" path instead of the
+    // concurrency guard this test is actually about).
+    evaluatePitchMock.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return { session_id: "evaluated", target_mode: "generic", overall_score: 5 };
+    });
+
+    const body = {
+      session_id: sessionId,
+      duration_seconds: 10,
+      transcript: [{ role: "user", text: "hola" }],
+    };
+    const [res1, res2] = await Promise.all([
+      request(app).post("/api/session/end").set("Authorization", "Bearer t1").send(body),
+      request(app).post("/api/session/end").set("Authorization", "Bearer t1").send(body),
+    ]);
+
+    const statuses = [res1.status, res2.status].sort();
+    // One succeeds (200); the other sees it already claimed (409). Either
+    // order is fine — which request "wins" the race is not deterministic.
+    expect(statuses).toEqual([200, 409]);
+    expect(evaluatePitchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("/session/end repeated after completed does NOT re-evaluate — returns the persisted result", async () => {
+    const app = buildApp();
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const startRes = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    const sessionId = startRes.body.session_id as string;
+    const body = {
+      session_id: sessionId,
+      duration_seconds: 10,
+      transcript: [{ role: "user", text: "hola" }],
+    };
+
+    const first = await request(app).post("/api/session/end").set("Authorization", "Bearer t1").send(body);
+    expect(first.status).toBe(200);
+    expect(evaluatePitchMock).toHaveBeenCalledTimes(1);
+
+    const second = await request(app).post("/api/session/end").set("Authorization", "Bearer t1").send(body);
+    expect(second.status).toBe(200);
+    expect(second.body.evaluation).toEqual(first.body.evaluation);
+    expect(second.body.metrics).toEqual(first.body.metrics);
+    // The key assertion: no second call to the evaluator.
+    expect(evaluatePitchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("OpenRouter/evaluator failure leaves the session evaluation_failed, not silently in_progress", async () => {
+    const app = buildApp();
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const startRes = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    const sessionId = startRes.body.session_id as string;
+
+    evaluatePitchMock.mockRejectedValueOnce(new Error("OpenRouter evaluation failed (503): down"));
+    const endRes = await request(app)
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({ session_id: sessionId, duration_seconds: 10, transcript: [{ role: "user", text: "hola" }] });
+
+    expect(endRes.status).toBe(502);
+    const stored = sessionsStore.get(sessionId);
+    expect(stored?.status).toBe("evaluation_failed");
+    expect(stored?.status).not.toBe("in_progress");
+  });
+
+  it("a persistence failure after a successful evaluation is never reported as completed", async () => {
+    const app = buildApp();
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const startRes = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    const sessionId = startRes.body.session_id as string;
+
+    persistCompletedResultShouldFail = true;
+    const endRes = await request(app)
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({ session_id: sessionId, duration_seconds: 10, transcript: [{ role: "user", text: "hola" }] });
+
+    expect(endRes.status).toBe(503);
+    expect(endRes.body).not.toHaveProperty("evaluation");
+    const stored = sessionsStore.get(sessionId);
+    expect(stored?.status).toBe("persistence_failed");
+    expect(stored?.status).not.toBe("completed");
+  });
+
+  it("an invalid transition (claiming an abandoned session) is rejected with 409", async () => {
+    const app = buildApp();
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const startRes = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    const sessionId = startRes.body.session_id as string;
+
+    // Simulate the abandonment sweep having marked it.
+    const s = sessionsStore.get(sessionId)!;
+    sessionsStore.set(sessionId, { ...s, status: "abandoned" });
+
+    const endRes = await request(app)
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({ session_id: sessionId, duration_seconds: 10, transcript: [{ role: "user", text: "hola" }] });
+
+    expect(endRes.status).toBe(409);
+    // Abandoned cannot be completed through the normal flow.
+    expect(sessionsStore.get(sessionId)?.status).toBe("abandoned");
+  });
+
+  it("fails closed (503) when the repository throws during the claim transition", async () => {
+    const app = buildApp();
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const startRes = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    const sessionId = startRes.body.session_id as string;
+
+    const { claimSessionForEvaluation } = await import("./repositories/sessions.js");
+    (claimSessionForEvaluation as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("Firestore transaction failed")
+    );
+
+    const endRes = await request(app)
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({ session_id: sessionId, duration_seconds: 10, transcript: [{ role: "user", text: "hola" }] });
+
+    expect(endRes.status).toBe(503);
   });
 });
 

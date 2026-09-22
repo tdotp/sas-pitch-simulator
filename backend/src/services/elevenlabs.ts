@@ -10,6 +10,14 @@ import { buildInterviewerPrompt } from "../data/prompts.js";
 
 const ELEVEN_BASE = "https://api.elevenlabs.io/v1";
 
+// Phase 4: small, coherent addition alongside the OpenRouter timeout in
+// services/evaluator.ts — no request to an external provider should be
+// able to hang indefinitely. No retry here (unlike the evaluator): a
+// failed getSignedUrl already surfaces as a clean 502 from /session/start
+// (see routes.ts), and simply retrying the whole /session/start call is
+// already cheap and safe — no separate retry policy needed for this call.
+const SIGNED_URL_TIMEOUT_MS = 10_000;
+
 export interface AgentOverrides {
   agent: {
     prompt: { prompt: string };
@@ -78,10 +86,23 @@ export async function getSignedUrl(
     agentId
   )}`;
 
-  const res = await fetch(url, {
-    method: "GET",
-    headers: { "xi-api-key": config.elevenlabs.apiKey },
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SIGNED_URL_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "GET",
+      signal: controller.signal,
+      headers: { "xi-api-key": config.elevenlabs.apiKey },
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`ElevenLabs signed-url request timed out after ${SIGNED_URL_TIMEOUT_MS}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!res.ok) {
     const body = await res.text();

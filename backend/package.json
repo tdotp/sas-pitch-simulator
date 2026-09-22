@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "test": "vitest run",
-    "bootstrap:phase2-legacy-org": "tsx scripts/bootstrap-phase2-legacy-org.ts"
+    "bootstrap:phase2-legacy-org": "tsx scripts/bootstrap-phase2-legacy-org.ts",
+    "sessions:mark-abandoned": "tsx scripts/mark-abandoned-sessions.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -21,8 +21,10 @@ import { evaluatePitch } from "./services/evaluator.js";
 import { isAuthReady } from "./firebase.js";
 import {
   createSession,
-  getSessionById,
-  completeSession,
+  claimSessionForEvaluation,
+  markEvaluationFailed,
+  markPersistenceFailed,
+  persistCompletedResult,
   listSessionsByOrganization,
 } from "./repositories/sessions.js";
 
@@ -88,21 +90,33 @@ router.post(
     // first).
     const auth = req.auth!;
     const context = req.appContext!;
-    try {
-      const signed = await getSignedUrl(target, body.voice_gender);
-      const session: SessionRecord = {
-        session_id: randomUUID(),
-        user_id: auth.uid,
-        user_name: auth.email ?? auth.uid,
-        organization_id: context.organizationId,
-        target_mode: target,
-        voice_gender: signed.voice_gender,
-        voice_id: signed.voice_id,
-        status: "in_progress",
-        started_at: new Date().toISOString(),
-        owner_uid: auth.uid,
-      };
 
+    // Split so each failure maps to the right status per the error
+    // taxonomy (Phase 4): 502 for the external provider (ElevenLabs),
+    // 503 for our own backing dependency (Firestore) — and neither leaks
+    // the raw error message to the client.
+    let signed;
+    try {
+      signed = await getSignedUrl(target, body.voice_gender);
+    } catch (err) {
+      console.error("[/session/start] getSignedUrl falló:", (err as Error).message);
+      return res.status(502).json({ error: "No se pudo iniciar la sesión de voz. Intenta de nuevo." });
+    }
+
+    const session: SessionRecord = {
+      session_id: randomUUID(),
+      user_id: auth.uid,
+      user_name: auth.email ?? auth.uid,
+      organization_id: context.organizationId,
+      target_mode: target,
+      voice_gender: signed.voice_gender,
+      voice_id: signed.voice_id,
+      status: "in_progress",
+      started_at: new Date().toISOString(),
+      owner_uid: auth.uid,
+    };
+
+    try {
       // AWAITED (not fire-and-forget, unlike the Phase 1 version): the
       // /session/end ownership+tenant check reads this record BACK from
       // persistence, so it must actually exist there before the caller
@@ -110,24 +124,43 @@ router.post(
       // on the critical path in the whole app, by design — it's a single
       // small document write, not a page load.
       await createSession(session);
-
-      res.json({
-        session_id: session.session_id,
-        target_mode: target,
-        agent_id: signed.agent_id,
-        signed_url: signed.signed_url,
-        voice_id: signed.voice_id,
-        voice_gender: signed.voice_gender,
-        overrides: signed.overrides,
-      });
     } catch (err) {
-      console.error("[/session/start]", (err as Error).message);
-      res.status(502).json({ error: (err as Error).message });
+      console.error("[/session/start] createSession falló:", (err as Error).message);
+      return res.status(503).json({ error: "No se pudo guardar tu sesión. Intenta de nuevo." });
     }
+
+    res.json({
+      session_id: session.session_id,
+      target_mode: target,
+      agent_id: signed.agent_id,
+      signed_url: signed.signed_url,
+      voice_id: signed.voice_id,
+      voice_gender: signed.voice_gender,
+      overrides: signed.overrides,
+    });
   }
 );
 
 // ── SLOW LANE ─────────────────────────────────────────────
+//
+// Phase 4 lifecycle (see PHASE_04_SESSION_LIFECYCLE_REPORT.md):
+//   claimSessionForEvaluation  — atomic ownership+tenant+state check AND
+//                                 the in_progress -> evaluating transition,
+//                                 in one Firestore transaction. Handles
+//                                 idempotency (already completed -> return
+//                                 the persisted result, no re-evaluation)
+//                                 and concurrency (a second concurrent
+//                                 request sees "evaluating" and is
+//                                 rejected, never runs a second evaluation).
+//   evaluatePitch              — OpenRouter call, its own timeout + one
+//                                 bounded transient retry (evaluator.ts).
+//   persistCompletedResult     — the ONE write that makes a session
+//                                 durably "completed" (result + status
+//                                 together, atomic per Firestore semantics).
+// Every failure path writes an EXPLICIT terminal-ish status
+// (evaluation_failed / persistence_failed) instead of leaving the
+// session silently "in_progress" or claiming success the client can't
+// actually trust.
 router.post(
   "/session/end",
   requireAuth,
@@ -152,68 +185,102 @@ router.post(
       ? Math.max(0, Math.round(duration_seconds as number))
       : 0;
 
-    let stored: SessionRecord | null;
+    let claim: Awaited<ReturnType<typeof claimSessionForEvaluation>>;
     try {
-      stored = await getSessionById(session_id);
+      claim = await claimSessionForEvaluation({
+        sessionId: session_id,
+        ownerUid: req.auth!.uid,
+        organizationId: req.appContext!.organizationId,
+      });
     } catch (err) {
-      console.error("[/session/end] getSessionById falló:", (err as Error).message);
+      console.error("[/session/end] claimSessionForEvaluation falló:", (err as Error).message);
       return res.status(503).json({ error: "No se pudo verificar la sesión. Intenta de nuevo." });
     }
 
-    // Ownership (Phase 3, persisted — not the Phase 1 in-memory Map
-    // anymore): the authenticated caller must be the uid that started the
-    // session AND the session must belong to the organization currently
-    // authorized by req.appContext (PASS_WITH_FIXES round: the uid-only
-    // check missed a real case — a uid with Membership in both A and B
-    // could start a session under context A, then call /session/end with
-    // ?organization_id=B and pass the uid check despite the resource
-    // belonging to A, not the org actually authorized for that request).
-    // Both conditions are required together.
-    //
-    // CLIENT_ADMIN/COACH/AGENCY_ADMIN get NO special bypass here on
-    // purpose: administrative access to session RESULTS is a read
-    // concern (GET /admin/sessions), not something that should let
-    // anyone but the starter mutate/complete a session via this route.
-    //
-    // A missing session (never existed, wrong id, or a legacy pre-Phase-3
-    // doc without organization_id — see LEGACY_SESSION_POLICY), a session
-    // that belongs to someone else, and a session that belongs to the
-    // right uid but the wrong (currently unauthorized) organization all
-    // return the SAME 404, deliberately: distinguishing any of these
-    // would let a caller enumerate which session_ids are real but not
-    // fully theirs-in-this-context.
-    if (
-      !stored ||
-      stored.owner_uid !== req.auth!.uid ||
-      stored.organization_id !== req.appContext!.organizationId
-    ) {
+    // Ownership + tenant (Phase 3, still uniform 404 — folded into
+    // claimSessionForEvaluation's "not_found" outcome, see its comment)
+    // and any other unclaimable state.
+    if (claim.outcome === "not_found") {
       return res.status(404).json({ error: "Sesión no encontrada" });
     }
+    if (claim.outcome === "wrong_state") {
+      // e.g. abandoned: a real session the caller owns, but it can't be
+      // completed through the normal flow anymore.
+      return res.status(409).json({ error: "Esta sesión ya no puede completarse" });
+    }
+    if (claim.outcome === "in_progress_elsewhere") {
+      // A concurrent /session/end (or a very fast retry) already claimed
+      // it and is evaluating right now — never start a second evaluation.
+      return res.status(409).json({ error: "Esta sesión ya se está evaluando" });
+    }
+    if (claim.outcome === "already_completed") {
+      // IDEMPOTENCY: reconstruct the response from what's persisted —
+      // never re-run the evaluation for a session that's already done.
+      const s = claim.session;
+      if (!s.metrics || !s.evaluation) {
+        console.error(
+          "[/session/end] sesión 'completed' sin resultado persistido:",
+          session_id
+        );
+        return res.status(503).json({ error: "No se pudo recuperar el resultado. Intenta de nuevo." });
+      }
+      return res.json({
+        session_id,
+        target_mode: s.target_mode,
+        metrics: s.metrics,
+        evaluation: s.evaluation,
+      });
+    }
 
-    const target: TargetMode = stored.target_mode;
+    // claim.outcome === "claimed": we now exclusively hold "evaluating".
+    const target: TargetMode = claim.session.target_mode;
+    const metrics = computeMetrics(transcript, duration);
 
+    let evaluation;
     try {
-      const metrics = computeMetrics(transcript, duration);
-      const evaluation = await evaluatePitch({
+      evaluation = await evaluatePitch({
         sessionId: session_id,
         target,
         transcript,
         durationSeconds: duration,
         metrics,
       });
-
-      // Fire-and-forget is fine for THIS write: tenant/ownership integrity
-      // was already durably established by the awaited createSession at
-      // /session/start. Worst case on failure here is a session that
-      // stays "in_progress" in Firestore with stale results — not a
-      // security issue, just a data-completeness one.
-      void completeSession(session_id, { duration_seconds: duration, transcript, metrics, evaluation });
-
-      res.json({ session_id, target_mode: target, metrics, evaluation });
     } catch (err) {
-      console.error("[/session/end]", (err as Error).message);
-      res.status(502).json({ error: (err as Error).message });
+      const reason = (err as Error).message;
+      console.error("[/session/end] evaluatePitch falló:", reason);
+      try {
+        await markEvaluationFailed(session_id, reason);
+      } catch (markErr) {
+        // The session is stuck in "evaluating" if even this fails — same
+        // class of recoverable-but-stuck state as an abandoned session;
+        // see KNOWN_LIMITATIONS in PHASE_04_SESSION_LIFECYCLE_REPORT.md.
+        console.error("[/session/end] markEvaluationFailed también falló:", (markErr as Error).message);
+      }
+      return res.status(502).json({ error: "No se pudo evaluar la sesión. Intenta de nuevo más tarde." });
     }
+
+    try {
+      await persistCompletedResult(session_id, {
+        duration_seconds: duration,
+        transcript,
+        metrics,
+        evaluation,
+      });
+    } catch (err) {
+      console.error("[/session/end] persistCompletedResult falló:", (err as Error).message);
+      try {
+        await markPersistenceFailed(session_id, (err as Error).message);
+      } catch (markErr) {
+        console.error("[/session/end] markPersistenceFailed también falló:", (markErr as Error).message);
+      }
+      // Deliberately NOT 200: the evaluation ran, but nothing durable
+      // exists to back that up yet — the client must not be told this
+      // succeeded. A retry will re-claim (persistence_failed is
+      // claimable) and re-run the evaluation, since nothing was saved.
+      return res.status(503).json({ error: "No se pudo guardar tu resultado. Intenta de nuevo." });
+    }
+
+    res.json({ session_id, target_mode: target, metrics, evaluation });
   }
 );
 

@@ -19,6 +19,23 @@ export interface StartSessionRequest {
   voice_gender?: VoiceGender; // only meaningful for generic
 }
 
+// Phase 4 — explicit session lifecycle (see PHASE_04_SESSION_LIFECYCLE_REPORT.md
+// for the full state machine, SESSION_STATE_MODEL and VALID_TRANSITIONS).
+// Replaces the old, ambiguous "in_progress" | "completed" | "error" set —
+// "error" was never actually written anywhere; this makes explicit what
+// Phase 3 already needed but didn't have: separate states for "the
+// conversation is happening", "an evaluation is currently claimed/running"
+// (used for concurrency control), and — critically — WHY a session never
+// reached "completed" (evaluation failed vs. the result failed to persist
+// are different failures with different recovery paths).
+export type SessionStatus =
+  | "in_progress" // conversation happening; nothing has claimed it for evaluation yet
+  | "evaluating" // /session/end claimed it; evaluation is running (concurrency guard)
+  | "completed" // evaluation succeeded AND the result is durably persisted
+  | "evaluation_failed" // OpenRouter/evaluator failed (timeout, 4xx/5xx, bad JSON, ...)
+  | "persistence_failed" // evaluation succeeded but the final Firestore write failed
+  | "abandoned"; // in_progress for too long, never reached /session/end
+
 export interface SessionRecord {
   session_id: string;
   user_id: string;
@@ -26,7 +43,7 @@ export interface SessionRecord {
   target_mode: TargetMode;
   voice_gender: VoiceGender;
   voice_id: string;
-  status: "in_progress" | "completed" | "error";
+  status: SessionStatus;
   started_at: string;
   ended_at?: string;
   duration_seconds?: number;
@@ -46,6 +63,21 @@ export interface SessionRecord {
   // to reflect that Firestore reality, not because a newly created
   // session may omit it.
   organization_id?: string;
+  // Phase 4: when status is evaluation_failed or persistence_failed, a
+  // short, safe, human-readable reason — never a stack trace, never a
+  // secret (API keys, tokens). Truncated at write time; see
+  // repositories/sessions.ts.
+  failure_reason?: string;
+  // Phase 4: set whenever the document is written, independent of
+  // status — lets an abandonment sweep find "in_progress for a long time"
+  // without a separate timestamp per transition. ISO 8601.
+  updated_at?: string;
+  // Phase 4: full persisted result, present only once status === "completed".
+  // Kept optional because most statuses never have it — the type mirrors
+  // what's actually possible in Firestore.
+  transcript?: { full: string; user_only: string; agent_only: string };
+  metrics?: SpeechMetrics;
+  evaluation?: EvaluationResult;
 }
 
 // ─────────────────────────────────────────────────────────────
