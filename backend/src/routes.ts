@@ -226,6 +226,16 @@ router.get("/admin/sessions", requireAuth, async (_req: Request, res: Response) 
 // changed behavior in this phase. That application (tenant isolation,
 // per-endpoint RBAC) is Phase 3. organizationId/role always come from
 // Firestore Membership data via requireMembership, never from the client.
+//
+// Contract (PASS_WITH_FIXES round): with 0 eligible memberships -> 403;
+// exactly 1 -> 200 with that context automatically; 2+ without
+// ?organization_id -> 409 (ambiguous, never picked arbitrarily) with the
+// list of organization_ids the caller may choose from; ?organization_id=X
+// where X is one of the caller's own eligible memberships -> 200 for X;
+// ?organization_id=X the caller does NOT belong to -> 403 (a requested
+// organization is a selection among the caller's real memberships, never
+// an authority). "Eligible" requires the AppUser, the Membership, AND its
+// Organization to all be active — see services/context.ts.
 router.get(
   "/me",
   requireAuth,

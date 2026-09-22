@@ -22,11 +22,31 @@ import type { EntityStatus, Membership, Role } from "../types.js";
 const COLLECTION = "memberships";
 const VALID_ROLES: Role[] = ["AGENCY_ADMIN", "CLIENT_ADMIN", "COACH", "SPOKESPERSON"];
 
-// "::" cannot appear in a Firebase uid (alphanumeric) or in the slug-style
-// organization ids this project generates, so it's a safe, readable
-// separator for the deterministic id.
+// Collision-safety fix (Phase 2, PASS_WITH_FIXES round): the previous
+// version was `${userId}::${organizationId}` on the (correct, at the time)
+// assumption that "::" cannot appear in either component. That assumption
+// was never enforced by the code, so it was an ambiguous composition —
+// nothing stopped two DIFFERENT pairs from producing the SAME id if either
+// component ever contained "::" (e.g. userId="a::b", organizationId="c"
+// collides with userId="a", organizationId="b::c").
+//
+// Fix: percent-encode each component with encodeURIComponent before
+// joining. encodeURIComponent never emits a literal ":" (it always escapes
+// it to "%3A"), so the joining "::" can only ever appear as OUR separator
+// — never as part of an encoded component. That makes the mapping from
+// (userId, organizationId) to id collision-free by construction, for any
+// input, not just the inputs we currently expect to see. It also keeps
+// the id `get()`-friendly (encodeURIComponent never produces "/", which is
+// the one character Firestore document ids cannot contain).
+//
+// For every id this project has actually written so far, this produces
+// the EXACT SAME string as before: Firebase uids and this project's
+// slug-style organization ids only use characters (letters, digits, "-",
+// "_") that encodeURIComponent leaves untouched — see
+// membershipId.test.ts's "backward compatible" case. No data migration
+// was needed.
 export function membershipId(userId: string, organizationId: string): string {
-  return `${userId}::${organizationId}`;
+  return `${encodeURIComponent(userId)}::${encodeURIComponent(organizationId)}`;
 }
 
 function isRole(value: unknown): value is Role {

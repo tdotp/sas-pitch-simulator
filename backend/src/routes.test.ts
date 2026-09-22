@@ -52,11 +52,23 @@ vi.mock("./firebase.js", () => ({
 }));
 
 // Phase 2: GET /me resolves its context through requireMembership ->
-// resolveAppContext -> this repository. Mocked so these tests never touch
-// real Firestore; each /me test controls exactly what memberships "exist".
+// resolveAppContext -> these repositories. Mocked so these tests never
+// touch real Firestore; each /me test controls exactly what "exists".
+// Defaults (an active user, and every organization active) mean a test
+// only has to override what it actually cares about.
 const listMembershipsByUserMock = vi.fn();
 vi.mock("./repositories/memberships.js", () => ({
   listMembershipsByUser: (userId: string) => listMembershipsByUserMock(userId),
+}));
+
+const getUserMock = vi.fn();
+vi.mock("./repositories/users.js", () => ({
+  getUser: (uid: string) => getUserMock(uid),
+}));
+
+const getOrganizationMock = vi.fn();
+vi.mock("./repositories/organizations.js", () => ({
+  getOrganization: (id: string) => getOrganizationMock(id),
 }));
 
 const { router } = await import("./routes.js");
@@ -71,6 +83,27 @@ function buildApp() {
 beforeEach(() => {
   verifyIdTokenMock.mockReset();
   listMembershipsByUserMock.mockReset();
+  getUserMock.mockReset();
+  getOrganizationMock.mockReset();
+  // Sane defaults for the GET /me tests below: an active AppUser, and any
+  // organization looked up comes back active. Individual tests override
+  // these to exercise the inactive-user/inactive-org paths.
+  getUserMock.mockResolvedValue({
+    uid: "uid-1",
+    email: "allowed@test.com",
+    display_name: null,
+    status: "active",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+  });
+  getOrganizationMock.mockImplementation(async (id: string) => ({
+    id,
+    name: id,
+    slug: id,
+    status: "active",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+  }));
 });
 
 function membership(overrides: Record<string, unknown> = {}) {
@@ -217,7 +250,7 @@ describe("GET /me — Phase 2 server-resolved organization/role context", () => 
     expect(res.status).toBe(403);
   });
 
-  it("200s with the real organization/role for a known user with an active Membership", async () => {
+  it("200s with the real organization/role for a known user with exactly one eligible Membership", async () => {
     verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
     listMembershipsByUserMock.mockResolvedValue([
       membership({ organization_id: "org-real", role: "CLIENT_ADMIN" }),
@@ -236,7 +269,7 @@ describe("GET /me — Phase 2 server-resolved organization/role context", () => 
     });
   });
 
-  it("ignores organization_id/role sent by the client — the real Firestore values win", async () => {
+  it("ignores organization_id/role sent in the request body — the real Firestore values win", async () => {
     verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
     listMembershipsByUserMock.mockResolvedValue([
       membership({ organization_id: "org-real", role: "SPOKESPERSON" }),
@@ -254,31 +287,100 @@ describe("GET /me — Phase 2 server-resolved organization/role context", () => 
     expect(res.body.role).toBe("SPOKESPERSON");
   });
 
-  it("does not break with more than one active Membership — resolves deterministically", async () => {
+  it("with several active memberships and no ?organization_id, does NOT pick one arbitrarily", async () => {
     verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
     listMembershipsByUserMock.mockResolvedValue([
-      membership({
-        id: "m-newer",
-        organization_id: "org-newer",
-        role: "COACH",
-        created_at: "2026-06-01T00:00:00.000Z",
-      }),
-      membership({
-        id: "m-older",
-        organization_id: "org-older",
-        role: "AGENCY_ADMIN",
-        created_at: "2026-01-01T00:00:00.000Z",
-      }),
+      membership({ id: "m-a", organization_id: "org-a", role: "COACH" }),
+      membership({ id: "m-b", organization_id: "org-b", role: "AGENCY_ADMIN" }),
     ]);
 
     const res = await request(buildApp())
       .get("/api/me")
       .set("Authorization", "Bearer good");
 
+    expect(res.status).toBe(409);
+    expect(new Set(res.body.organization_ids)).toEqual(new Set(["org-a", "org-b"]));
+  });
+
+  it("with several active memberships, ?organization_id for one it belongs to resolves that context", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([
+      membership({ id: "m-a", organization_id: "org-a", role: "COACH" }),
+      membership({ id: "m-b", organization_id: "org-b", role: "AGENCY_ADMIN" }),
+    ]);
+
+    const res = await request(buildApp())
+      .get("/api/me?organization_id=org-b")
+      .set("Authorization", "Bearer good");
+
     expect(res.status).toBe(200);
-    // Deterministic selection strategy: oldest active Membership wins (see
-    // MULTI_MEMBERSHIP_SELECTION_STRATEGY in services/context.ts).
-    expect(res.body.organizationId).toBe("org-older");
-    expect(res.body.role).toBe("AGENCY_ADMIN");
+    expect(res.body).toEqual({
+      userId: "uid-1",
+      email: "allowed@test.com",
+      organizationId: "org-b",
+      role: "AGENCY_ADMIN",
+    });
+  });
+
+  it("rejects ?organization_id for an organization the caller does not belong to", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([
+      membership({ id: "m-a", organization_id: "org-a", role: "COACH" }),
+    ]);
+
+    const res = await request(buildApp())
+      .get("/api/me?organization_id=org-attacker-supplied")
+      .set("Authorization", "Bearer good");
+
+    expect(res.status).toBe(403);
+  });
+
+  it("403s when the AppUser record is inactive, even with an active Membership", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
+    getUserMock.mockResolvedValue({
+      uid: "uid-1",
+      email: "allowed@test.com",
+      display_name: null,
+      status: "inactive",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+    listMembershipsByUserMock.mockResolvedValue([membership()]);
+
+    const res = await request(buildApp())
+      .get("/api/me")
+      .set("Authorization", "Bearer good");
+
+    expect(res.status).toBe(403);
+  });
+
+  it("403s when the Membership's Organization is inactive", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([membership({ organization_id: "org-deactivated" })]);
+    getOrganizationMock.mockResolvedValue({
+      id: "org-deactivated",
+      name: "Deactivated",
+      slug: "org-deactivated",
+      status: "inactive",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+
+    const res = await request(buildApp())
+      .get("/api/me")
+      .set("Authorization", "Bearer good");
+
+    expect(res.status).toBe(403);
+  });
+
+  it("fails closed (503) when the membership repository throws", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
+    listMembershipsByUserMock.mockRejectedValue(new Error("Firestore is down"));
+
+    const res = await request(buildApp())
+      .get("/api/me")
+      .set("Authorization", "Bearer good");
+
+    expect(res.status).toBe(503);
   });
 });
