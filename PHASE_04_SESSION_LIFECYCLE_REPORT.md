@@ -4,8 +4,12 @@
 **Fase:** 4 de 15 — Session Lifecycle Durable
 **Fecha:** 22 de septiembre de 2026
 **Commit base aprobado (Fase 3, cerrada):** `4c4072d39734b666352d03b52ac817c3bc8d1393`
-**Código de esta fase:** `56055b547cc766e56af9df7cd051f64725548204`
-**Estado:** implementado, testeado y buildeado localmente. **NO desplegado.**
+**Código original de esta fase:** `56055b547cc766e56af9df7cd051f64725548204`
+**Código con los fixes del round `PASS_WITH_FIXES`:** `e43a748c4c86293eb4e091144797796c170af12f`
+**Estado:** revisión técnica recibida (`PASS_WITH_FIXES`) — la arquitectura
+general está aprobada; el fix estructural pedido ya está implementado y
+testeado. **Pendiente del PASS final — no se declara la fase cerrada hasta
+recibirlo.** NO desplegado.
 
 ---
 
@@ -89,11 +93,27 @@ persistence_failed    → evaluating           (claimSessionForEvaluation, retry
 **Explícitamente prohibidas (y verificadas por tests):**
 
 ```
-completed  → evaluating     (idempotencia: se devuelve el resultado persistido, nunca se re-reclama)
-evaluating → evaluating     (concurrencia: la segunda request ve in_progress_elsewhere, 409)
-abandoned  → evaluating     (claimSessionForEvaluation devuelve wrong_state, 409)
-abandoned  → completed      (sin operación de recuperación — no se construyó una en esta fase)
+completed  → evaluating              (idempotencia: se devuelve el resultado persistido, nunca se re-reclama)
+evaluating → evaluating              (concurrencia: la segunda request ve in_progress_elsewhere, 409)
+abandoned  → evaluating              (claimSessionForEvaluation devuelve wrong_state, 409)
+abandoned  → completed               (sin operación de recuperación — no se construyó una en esta fase)
+completed  → evaluation_failed       (PASS_WITH_FIXES: ver más abajo)
+completed  → persistence_failed      (PASS_WITH_FIXES: ver más abajo — el caso más importante)
+cualquier estado != evaluating → completed / evaluation_failed / persistence_failed
 ```
+
+> **Corrección (revisión `PASS_WITH_FIXES`):** la versión original de esta
+> fase declaraba estas últimas tres transiciones como prohibidas en este
+> documento, pero **no las hacía cumplir en el código** —
+> `persistCompletedResult`, `markEvaluationFailed` y
+> `markPersistenceFailed` escribían sin ninguna precondición y podían
+> sobrescribir *cualquier* status, incluido `completed`. Ya está
+> corregido: las tres ahora solo aplican si el status actual es
+> exactamente `evaluating` (compare-and-set vía transacción de Firestore,
+> o su equivalente en el fallback de memoria) — ver
+> `PHASE_04_FIXES_ADDENDUM` al final de este documento para el detalle
+> completo, incluyendo el caso de la confirmación ambigua donde
+> `completed` debe ganar siempre.
 
 Todas las transiciones viven en `repositories/sessions.ts`
 (`claimSessionForEvaluation`, `markEvaluationFailed`,
@@ -220,10 +240,11 @@ no es determinista, y el test no lo asume).
 
 Cualquier fallo de `evaluatePitch` (timeout, 429, 5xx, contenido vacío,
 JSON no parseable) se captura en `routes.ts`, se llama
-`markEvaluationFailed(sessionId, reason)` (transición `evaluating →
-evaluation_failed`, con `failure_reason` saneado — ver abajo), y se
-responde **502** al cliente con un mensaje genérico y accionable ("No se
-pudo evaluar la sesión. Intenta de nuevo más tarde."). La sesión **nunca**
+`markEvaluationFailed(sessionId, category)` (transición `evaluating →
+evaluation_failed`, **guardada**: solo aplica si el status actual sigue
+siendo `evaluating` — ver `PHASE_04_FIXES_ADDENDUM`), y se responde
+**502** al cliente con un mensaje genérico y accionable ("No se pudo
+evaluar la sesión. Intenta de nuevo más tarde."). La sesión **nunca**
 queda silenciosamente en `evaluating` ni vuelve a `in_progress`.
 
 Si incluso el propio `markEvaluationFailed` fallara (Firestore caído en
@@ -231,8 +252,16 @@ ese instante), se loguea internamente y la sesión queda atascada en
 `evaluating` — ver `KNOWN_LIMITATIONS`, es el mismo tipo de estado
 recuperable-pero-atascado que una sesión `abandoned` sin barrer.
 
-`failure_reason` se trunca a 300 caracteres y nunca incluye un stack
-trace — solo el mensaje de error ya resumido que arma `evaluator.ts`.
+**`failure_reason` (corregido en `PASS_WITH_FIXES`) es una categoría
+operativa corta y segura** — `OPENROUTER_TIMEOUT`,
+`OPENROUTER_RATE_LIMITED`, `OPENROUTER_5XX`, `OPENROUTER_4XX`,
+`OPENROUTER_EMPTY_RESPONSE`, `OPENROUTER_INVALID_JSON`, o
+`OPENROUTER_UNKNOWN_ERROR` — **nunca el body crudo de la respuesta de
+OpenRouter.** La versión original persistía `(err as Error).message`,
+que para un fallo HTTP incluía hasta 400 caracteres del cuerpo de la
+respuesta de OpenRouter tal cual. El detalle crudo sigue existiendo, pero
+solo en `console.error` (logs del servidor), nunca en Firestore ni en la
+respuesta al cliente. Ver `FAILURE_REASON_TAXONOMY` en el addendum.
 
 ---
 
@@ -247,11 +276,27 @@ atómica, así que no existe un estado intermedio donde el resultado esté
 cambió).
 
 Si falla: se captura en `routes.ts`, se intenta
-`markPersistenceFailed(sessionId, reason)` — una escritura **más chica**
-(solo `status` + `failure_reason`, sin el payload completo), con mejor
-chance de éxito si el fallo original fue de tamaño de payload o un blip
-transitorio. Si **esa** escritura también falla, la sesión queda en
-`evaluating` (mismo caso límite que arriba). En cualquier caso, la
+`markPersistenceFailed(sessionId, "FIRESTORE_WRITE_FAILED")` — una
+escritura **más chica** (solo `status` + `failure_reason`, sin el payload
+completo), con mejor chance de éxito si el fallo original fue de tamaño
+de payload o un blip transitorio. Si **esa** escritura también falla, la
+sesión queda en `evaluating` (mismo caso límite que arriba).
+
+> **Corrección crítica (revisión `PASS_WITH_FIXES`):**
+> `markPersistenceFailed` está **guardado**: solo aplica si el status
+> actual sigue siendo `evaluating`. Esto importa exactamente para el caso
+> que la revisión señaló: si `persistCompletedResult` **sí alcanzó a
+> escribir `completed` en Firestore** pero la llamada igual lanzó una
+> excepción (confirmación/red ambigua), el `catch` de `routes.ts` llama
+> `markPersistenceFailed` de todas formas — y ese guard lo rechaza,
+> reportando `currentStatus: "completed"` en vez de sobrescribirlo.
+> `routes.ts` detecta esa respuesta específica y **recupera el resultado
+> real desde Firestore** (`getSessionById`) en vez de devolver un 503
+> falso — el cliente recibe 200 con la evaluación de verdad. Ver
+> `PHASE_04_FIXES_ADDENDUM` para el detalle completo y el test que lo
+> prueba de punta a punta.
+
+En cualquier otro caso (la sesión de verdad seguía `evaluating`), la
 respuesta al cliente es **503**, nunca 200 — la evaluación sí se calculó,
 pero como no hay nada persistido que la respalde, no se le puede decir al
 cliente que "terminó".
@@ -302,7 +347,7 @@ estado queda recuperable" — el estado queda recuperable por diseño.
 
 | Llamada | Timeout | Mecanismo |
 |---|---|---|
-| OpenRouter (`evaluatePitch`) | 30s por intento (hasta 2 intentos = ~30.5s en el peor caso) | `AbortController` + `setTimeout` |
+| OpenRouter (`evaluatePitch`) | 30s por intento, hasta 2 intentos (1 retry) + 500ms de backoff = **~60.5s en el peor caso** (corregido en el round `PASS_WITH_FIXES`; la versión original de este reporte decía ~30.5s, un error de cálculo — 30s + 500ms + 30s, no 30s + 500ms) | `AbortController` + `setTimeout` |
 | ElevenLabs (`getSignedUrl`) | 10s | `AbortController` + `setTimeout` |
 
 Ninguna de las dos llamadas puede quedar colgada indefinidamente. 30s se
@@ -466,16 +511,22 @@ para exponer las nuevas funciones en vez de las viejas.
 
 ## TEST_RESULTS
 
+**Esta sección refleja el estado tras la revisión `PASS_WITH_FIXES`** —
+ver `PHASE_04_FIXES_ADDENDUM` para el detalle de qué se agregó en ese
+round.
+
 ```
 $ npm test
 > npm run test --workspace=backend && npm run test --workspace=frontend
 
-backend:  Test Files  9 passed (9) | Tests  109 passed (109)
+backend:  Test Files  9 passed (9) | Tests  121 passed (121)
 frontend: Test Files  1 passed (1) | Tests   4 passed (4)
 ```
 
-(109 backend = 76 de Fases 1–3 + 33 nuevas de Fase 4: 18 en
-`sessions.test.ts` + 7 en `evaluator.test.ts` + 8 en `routes.test.ts`.)
+(121 backend = 76 de Fases 1–3 + 45 de Fase 4: 25 en `sessions.test.ts`
+[18 originales + 7 del round de fixes] + 11 en `evaluator.test.ts` [7
+originales + 4 de clasificación de categorías] + 9 en `routes.test.ts`
+[8 originales + 1 del test de recuperación].)
 
 ```
 $ npm run build
@@ -488,6 +539,11 @@ frontend: tsc -b && vite build  -> sin errores
 
 ## KNOWN_LIMITATIONS
 
+- **RESUELTO (revisión `PASS_WITH_FIXES`):** ~~`persistCompletedResult`/
+  `markEvaluationFailed`/`markPersistenceFailed` escribían sin
+  precondición y podían sobrescribir cualquier status, incluido
+  `completed`~~. Ya no: las tres solo aplican desde `evaluating`
+  (compare-and-set transaccional). Ver `PHASE_04_FIXES_ADDENDUM`.
 - **Una sesión puede quedar atascada en `evaluating`** si tanto la
   operación original (evaluar o persistir) como el intento de marcar el
   fallo correspondiente (`markEvaluationFailed`/`markPersistenceFailed`)
@@ -583,7 +639,8 @@ de ella.
 
 ## OPEN_ITEMS
 
-- [ ] Revisar y aprobar este reporte.
+- [ ] **Recibir el PASS final** de esta revisión (round `PASS_WITH_FIXES`
+      ya aplicado — ver `PHASE_04_FIXES_ADDENDUM`).
 - [ ] Decidir si `sessions:mark-abandoned` se agenda en un cron real del
       VPS, o se sigue corriendo a mano.
 - [ ] Considerar si el sweep de abandono debería también recoger
@@ -598,5 +655,136 @@ de ella.
 
 ---
 
-**Commit de código de esta fase:** `56055b547cc766e56af9df7cd051f64725548204`
-**Este reporte:** commiteado por separado, después del código.
+## PHASE_04_FIXES_ADDENDUM (round `PASS_WITH_FIXES`)
+
+**El fix estructural pedido:** las tres salidas de `evaluating`
+(`persistCompletedResult`, `markEvaluationFailed`,
+`markPersistenceFailed`) escribían sin ninguna precondición — podían
+sobrescribir *cualquier* status, contradiciendo `VALID_TRANSITIONS`.
+
+**Solución:** `applyFromEvaluating(sessionId, buildUpdate)`, una función
+interna compartida por las tres, que:
+
+1. Lee el documento (dentro de una transacción de Firestore, o
+   directamente en el fallback de memoria).
+2. Si `status !== "evaluating"` → **rechaza sin escribir nada**, devuelve
+   `{ applied: false, currentStatus: <el status real> }`.
+3. Si `status === "evaluating"` → aplica la actualización, devuelve
+   `{ applied: true }`.
+
+Esto convierte a las tres funciones en un compare-and-set real: en
+Firestore, vía `runTransaction` (la misma garantía transaccional que ya
+usaban `claimSessionForEvaluation` y `markAbandoned` desde la versión
+original de esta fase — no se introdujo ningún mecanismo nuevo, se
+extendió el mismo patrón a las tres funciones que faltaban). En el
+fallback de memoria, el mismo chequeo secuencial (lectura + comparación +
+escritura, sin ningún `await` entre medio — ver el mismo razonamiento de
+atomicidad de `claimSessionForEvaluation` en `CONCURRENCY_MODEL`).
+
+**El caso especialmente importante (confirmación ambigua):**
+`persistCompletedResult` puede lanzar una excepción en `routes.ts`
+aunque su escritura en Firestore **sí haya tenido éxito** — por ejemplo,
+si el commit llegó al servidor pero la confirmación de vuelta se perdió
+por un problema de red. Antes de este fix, el `catch` de `routes.ts`
+llamaba `markPersistenceFailed` sin condición, degradando
+silenciosamente un `completed` real a `persistence_failed` y
+**descartando un resultado ya guardado**.
+
+Ahora:
+
+```ts
+// routes.ts, dentro del catch de persistCompletedResult:
+const marked = await markPersistenceFailed(session_id, "FIRESTORE_WRITE_FAILED")...;
+if (marked && !marked.applied && marked.currentStatus === "completed") {
+  // El guard rechazó la escritura porque la sesión YA está completed —
+  // el escrito original sí funcionó. Recuperar el resultado real en vez
+  // de reportar un 503 falso.
+  const recovered = await getSessionById(session_id);
+  if (recovered?.metrics && recovered?.evaluation) {
+    return res.json({ session_id, target_mode: recovered.target_mode,
+                       metrics: recovered.metrics, evaluation: recovered.evaluation });
+  }
+}
+```
+
+`completed` gana siempre y el resultado persistido se conserva —
+probado de punta a punta con un test de integración que simula
+exactamente ese escenario (la escritura "secretamente" tiene éxito pero
+la llamada igual lanza), verificando que la respuesta al cliente sea
+**200 con la evaluación real**, no un 503.
+
+**`FAILURE_REASON_TAXONOMY` (el otro pedido de este round):**
+`failure_reason` ya no persiste el mensaje crudo del error (que para un
+fallo HTTP de OpenRouter podía incluir hasta 400 caracteres del cuerpo
+de la respuesta upstream tal cual). `evaluator.ts` ahora clasifica cada
+fallo en una categoría segura y corta:
+
+```ts
+type EvaluationFailureCategory =
+  | "OPENROUTER_TIMEOUT"
+  | "OPENROUTER_NETWORK_ERROR"
+  | "OPENROUTER_RATE_LIMITED"    // 429
+  | "OPENROUTER_5XX"
+  | "OPENROUTER_4XX"             // cualquier 4xx que no sea 429
+  | "OPENROUTER_EMPTY_RESPONSE"
+  | "OPENROUTER_INVALID_JSON"
+  | "OPENROUTER_UNKNOWN_ERROR";  // fallback si el error no es un EvaluationError
+```
+
+`EvaluationError` (ahora exportada desde `evaluator.ts`) carga tanto
+`.category` (lo que se persiste) como `.message` (el detalle crudo, que
+`routes.ts` sigue logueando vía `console.error` pero **nunca** escribe en
+Firestore ni devuelve al cliente). Para el fallo de persistencia, el
+`reason` pasado a `markPersistenceFailed` también se volvió una
+categoría fija (`"FIRESTORE_WRITE_FAILED"`) en vez del mensaje crudo del
+error de Firestore.
+
+**Corrección de este mismo reporte:** el peor caso de timeout de
+`evaluatePitch` decía `~30.5s`; el cálculo correcto es **~60.5s** (30s +
+500ms de backoff + 30s del segundo intento, no 30s + 500ms). Corregido en
+`TIMEOUT_POLICY` arriba.
+
+**Tests nuevos:**
+
+`repositories/sessions.test.ts` (7, exactamente los 5 pedidos +2):
+1. `completed` + `markEvaluationFailed` → sigue `completed`.
+2. `completed` + `markPersistenceFailed` → sigue `completed`.
+3. `abandoned` + `persistCompletedResult` → rechazado, sigue `abandoned`.
+4. `evaluation_failed` + `persistCompletedResult` sin nuevo claim →
+   rechazado.
+5. `completed` + intento posterior de `markPersistenceFailed` → el
+   resultado persistido queda **byte a byte idéntico** (`toEqual` sobre
+   el documento completo antes/después).
+6. (extra) el camino normal desde `evaluating` sigue aplicando
+   correctamente (`{ applied: true }`).
+7. (extra) `currentStatus: null` para una sesión que no existe.
+
+`services/evaluator.test.ts` (+4): clasificación correcta de timeout,
+503/429, 400/JSON inválido, y que el detalle crudo nunca se filtra a la
+categoría.
+
+`routes.test.ts` (+1): el test de recuperación de punta a punta descrito
+arriba (confirmación ambigua → 200 con el resultado real, no 503).
+
+Mismo fallback de memoria: `applyFromEvaluating` implementa la misma
+semántica de guard para el modo sin Firestore (local dev), verificado
+por los mismos tests (`sessions.test.ts` corre contra ese fallback).
+
+No se tocó nada más de la arquitectura de esta fase. No se avanzó a
+Fase 5. No se desplegó.
+
+```
+$ npm test
+backend:  Test Files  9 passed (9) | Tests  121 passed (121)   (antes 109)
+frontend: Test Files  1 passed (1) | Tests   4 passed (4)
+
+$ npm run build
+backend:  tsc -p tsconfig.json  -> sin errores
+frontend: tsc -b && vite build  -> sin errores
+```
+
+---
+
+**Commit de código original de esta fase:** `56055b547cc766e56af9df7cd051f64725548204`
+**Commit de los fixes de este addendum:** `e43a748c4c86293eb4e091144797796c170af12f`
+**Este reporte:** commiteado por separado, después del código de los fixes.
