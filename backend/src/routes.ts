@@ -8,6 +8,7 @@ import rateLimit from "express-rate-limit";
 import { randomUUID } from "node:crypto";
 import { assertElevenReady, assertOpenRouterReady, config } from "./config.js";
 import { requireAuth } from "./middleware/auth.js";
+import { requireMembership } from "./middleware/context.js";
 import type {
   SessionRecord,
   StartSessionRequest,
@@ -219,3 +220,17 @@ router.get("/admin/sessions", requireAuth, async (_req: Request, res: Response) 
     res.status(500).json({ error: (err as Error).message });
   }
 });
+
+// Phase 2: exposes the server-resolved identity/organization/role context.
+// Deliberately does NOT gate or filter any other resource — no other route
+// changed behavior in this phase. That application (tenant isolation,
+// per-endpoint RBAC) is Phase 3. organizationId/role always come from
+// Firestore Membership data via requireMembership, never from the client.
+router.get(
+  "/me",
+  requireAuth,
+  requireMembership,
+  (req: Request, res: Response) => {
+    res.json(req.appContext);
+  }
+);

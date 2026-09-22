@@ -42,6 +42,71 @@ export interface SessionRecord {
   owner_uid?: string;
 }
 
+// ─────────────────────────────────────────────────────────────
+// Phase 2 — Organization / Membership / Role domain model.
+// Identity keeps coming exclusively from Firebase Auth (see
+// middleware/auth.ts). These types describe APPLICATION identity/
+// membership data, persisted in Firestore, which Firebase Auth itself
+// knows nothing about.
+// ─────────────────────────────────────────────────────────────
+
+export type Role = "AGENCY_ADMIN" | "CLIENT_ADMIN" | "COACH" | "SPOKESPERSON";
+
+export type EntityStatus = "active" | "inactive";
+
+// Represents a client/tenant of the platform. Deliberately minimal — no
+// client configuration (scenarios, rubrics, prompts) lives here yet; that
+// is Phase 5 (ENGINE vs CONFIG), not this phase.
+export interface Organization {
+  id: string;
+  name: string;
+  slug: string;
+  status: EntityStatus;
+  created_at: string; // ISO 8601
+  updated_at: string;
+}
+
+// Minimal application-level profile for a Firebase user. NEVER stores a
+// password or any auth secret — Firebase Auth remains the sole
+// authentication authority. This is just bookkeeping metadata Firestore
+// knows about a person.
+export interface AppUser {
+  uid: string; // Firebase uid — same id space, not a separate identity
+  email: string | null;
+  display_name: string | null;
+  status: EntityStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+// Links one Firebase user to one Organization with one Role. A user MAY
+// have more than one Membership (different organizations — this is what
+// lets AGENCY_ADMIN eventually span several). The (user_id, organization_id)
+// pair is unique by construction: see membershipId() in
+// repositories/memberships.ts, which derives a deterministic Firestore
+// document id from that pair instead of relying on a query-time
+// uniqueness check.
+export interface Membership {
+  id: string; // == membershipId(user_id, organization_id)
+  user_id: string; // Firebase uid
+  organization_id: string;
+  role: Role;
+  status: EntityStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+// Server-resolved application context for the current request. NEVER
+// derived from anything the client sends — see resolveAppContext in
+// services/context.ts. organizationId/role always come from a Membership
+// document read from Firestore, keyed by the verified uid.
+export interface AppContext {
+  userId: string; // Firebase uid
+  email: string | null;
+  organizationId: string;
+  role: Role;
+}
+
 // Transcript turn as delivered by ElevenLabs (or built client-side).
 export interface TranscriptTurn {
   role: "user" | "agent";

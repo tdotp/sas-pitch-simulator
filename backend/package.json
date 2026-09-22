@@ -8,7 +8,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "bootstrap:phase2-legacy-org": "tsx scripts/bootstrap-phase2-legacy-org.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

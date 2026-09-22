@@ -48,6 +48,15 @@ vi.mock("./firebase.js", () => ({
   saveSessionStart: vi.fn(async () => {}),
   saveSessionResult: vi.fn(async () => {}),
   listSessions: vi.fn(async () => []),
+  isAuthReady: vi.fn(() => true),
+}));
+
+// Phase 2: GET /me resolves its context through requireMembership ->
+// resolveAppContext -> this repository. Mocked so these tests never touch
+// real Firestore; each /me test controls exactly what memberships "exist".
+const listMembershipsByUserMock = vi.fn();
+vi.mock("./repositories/memberships.js", () => ({
+  listMembershipsByUser: (userId: string) => listMembershipsByUserMock(userId),
 }));
 
 const { router } = await import("./routes.js");
@@ -61,7 +70,21 @@ function buildApp() {
 
 beforeEach(() => {
   verifyIdTokenMock.mockReset();
+  listMembershipsByUserMock.mockReset();
 });
+
+function membership(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "m1",
+    user_id: "uid-1",
+    organization_id: "org-1",
+    role: "SPOKESPERSON",
+    status: "active",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
 
 describe("sensitive routes require a valid, allowlisted token", () => {
   it("POST /session/start -> 401 without Authorization header", async () => {
@@ -163,5 +186,99 @@ describe("identity is derived from the verified token, never the body", () => {
         transcript: [{ role: "user", text: "hola" }],
       });
     expect(endRes.status).toBe(200);
+  });
+});
+
+describe("GET /me — Phase 2 server-resolved organization/role context", () => {
+  it("401s without a token", async () => {
+    const res = await request(buildApp()).get("/api/me");
+    expect(res.status).toBe(401);
+  });
+
+  it("403s a valid, allowlisted token with no active Membership", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([]);
+
+    const res = await request(buildApp())
+      .get("/api/me")
+      .set("Authorization", "Bearer good");
+
+    expect(res.status).toBe(403);
+  });
+
+  it("403s when the only Membership is inactive", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([membership({ status: "inactive" })]);
+
+    const res = await request(buildApp())
+      .get("/api/me")
+      .set("Authorization", "Bearer good");
+
+    expect(res.status).toBe(403);
+  });
+
+  it("200s with the real organization/role for a known user with an active Membership", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([
+      membership({ organization_id: "org-real", role: "CLIENT_ADMIN" }),
+    ]);
+
+    const res = await request(buildApp())
+      .get("/api/me")
+      .set("Authorization", "Bearer good");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      userId: "uid-1",
+      email: "allowed@test.com",
+      organizationId: "org-real",
+      role: "CLIENT_ADMIN",
+    });
+  });
+
+  it("ignores organization_id/role sent by the client — the real Firestore values win", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([
+      membership({ organization_id: "org-real", role: "SPOKESPERSON" }),
+    ]);
+
+    // A GET normally carries no body, but nothing stops a client from
+    // sending one — prove the handler never reads it for identity/context.
+    const res = await request(buildApp())
+      .get("/api/me")
+      .set("Authorization", "Bearer good")
+      .send({ organization_id: "org-attacker-supplied", role: "AGENCY_ADMIN" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.organizationId).toBe("org-real");
+    expect(res.body.role).toBe("SPOKESPERSON");
+  });
+
+  it("does not break with more than one active Membership — resolves deterministically", async () => {
+    verifyIdTokenMock.mockResolvedValue({ uid: "uid-1", email: "allowed@test.com" });
+    listMembershipsByUserMock.mockResolvedValue([
+      membership({
+        id: "m-newer",
+        organization_id: "org-newer",
+        role: "COACH",
+        created_at: "2026-06-01T00:00:00.000Z",
+      }),
+      membership({
+        id: "m-older",
+        organization_id: "org-older",
+        role: "AGENCY_ADMIN",
+        created_at: "2026-01-01T00:00:00.000Z",
+      }),
+    ]);
+
+    const res = await request(buildApp())
+      .get("/api/me")
+      .set("Authorization", "Bearer good");
+
+    expect(res.status).toBe(200);
+    // Deterministic selection strategy: oldest active Membership wins (see
+    // MULTI_MEMBERSHIP_SELECTION_STRATEGY in services/context.ts).
+    expect(res.body.organizationId).toBe("org-older");
+    expect(res.body.role).toBe("AGENCY_ADMIN");
   });
 });
