@@ -2,7 +2,7 @@
 
 Pega este archivo (o dile al nuevo chat que lo lea) y podrá continuar sin leer
 el resto de la documentación. Última actualización: 22 de septiembre de 2026
-(Fase 3 implementada, pendiente de revisión).
+(Fase 4 implementada, pendiente de revisión).
 
 ## 1. Qué es
 
@@ -23,14 +23,17 @@ esté público.
   `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md`.
 - **Fase 2 (Organization + Membership + Role): CERRADA, aprobada.** Ver
   `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md`.
-- **Fase 3 (tenant isolation + RBAC real): implementada, testeada,
+- **Fase 3 (tenant isolation + RBAC real): CERRADA, aprobada.** Ver
+  `PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md`.
+- **Fase 4 (session lifecycle durable): implementada, testeada,
   pendiente de revisión técnica — todavía NO se declara cerrada.** No
   desplegar hasta recibir el PASS. Ver
-  `PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md`.
+  `PHASE_04_SESSION_LIFECYCLE_REPORT.md`.
 - Ninguna fase está desplegada todavía.
 - Producción sigue corriendo la versión **original** (login hardcoded, sin
-  auth real, sin Organization/Membership, sin tenant isolation) hasta que
-  se apruebe y despliegue todo lo anterior de una vez:
+  auth real, sin Organization/Membership, sin tenant isolation, sin
+  session lifecycle) hasta que se apruebe y despliegue todo lo anterior de
+  una vez:
   - Frontend: https://smartpr-pitch-agent.web.app (Firebase Hosting)
   - Backend: https://185-215-180-182.nip.io (VPS, Docker + Caddy, HTTPS vía nip.io)
 - El código pasa build y tests localmente (backend + frontend), pero
@@ -182,14 +185,14 @@ completo en `SPOKESPERSON_TRAINING_SCALING_REPORT.md` y
 
 ## 9. Pendientes sugeridos
 
-1. **Revisar y aprobar `PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md`, y
-   luego desplegar Fases 1–3 juntas** (frontend a Firebase Hosting,
-   backend al VPS) — hoy solo están implementadas y testeadas localmente.
+1. **Revisar y aprobar `PHASE_04_SESSION_LIFECYCLE_REPORT.md`, y luego
+   desplegar Fases 1–4 juntas** (frontend a Firebase Hosting, backend al
+   VPS) — hoy solo están implementadas y testeadas localmente.
 2. Probar los 3 escenarios completos (no solo el genérico) con usuarios reales y
    confirmar que el cierre a los 3s de silencio se siente natural en un celular
    con conversación de voz real.
-3. Fase 4: session lifecycle durable completo (reemplazar el resto del
-   `Map` en memoria, formalizar estados de abandono).
+3. Decidir si `npm run sessions:mark-abandoned` se agenda en un cron real
+   del VPS o se sigue corriendo a mano.
 4. Considerar dominio propio para el backend (hoy `nip.io`).
 
 ## 10. Documentos existentes (solo si necesitas más detalle)
@@ -199,5 +202,6 @@ completo en `SPOKESPERSON_TRAINING_SCALING_REPORT.md` y
 `PHASE_01_AUTH_IMPLEMENTATION_REPORT.md` (auth real),
 `PHASE_02_ORG_MEMBERSHIP_IMPLEMENTATION_REPORT.md` (Organization +
 Membership + Role), `PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md` (tenant
-isolation + RBAC real — 22-sep-2026), `ACCESOS.md` (credenciales, no
+isolation + RBAC real), `PHASE_04_SESSION_LIFECYCLE_REPORT.md` (session
+lifecycle durable — 22-sep-2026), `ACCESOS.md` (credenciales, no
 versionado), `git log` (historial con mensajes detallados de cada cambio).
