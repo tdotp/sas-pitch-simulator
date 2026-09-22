@@ -302,3 +302,131 @@ describe("markAbandoned", () => {
     expect(result.outcome).toBe("not_found");
   });
 });
+
+describe("PASS_WITH_FIXES: guarded exits from evaluating (compare-and-set)", () => {
+  // The fix this round: persistCompletedResult / markEvaluationFailed /
+  // markPersistenceFailed used to write unconditionally and could
+  // overwrite ANY status. They must now only apply from "evaluating" —
+  // everything else is preserved untouched and reported via
+  // `currentStatus`, never silently clobbered.
+
+  it("1. completed + markEvaluationFailed -> still completed (rejected, not applied)", async () => {
+    const s = newSession();
+    await createSession(s);
+    await claimSessionForEvaluation({ sessionId: s.session_id, ownerUid: "uid-1", organizationId: "org-1" });
+    await persistCompletedResult(s.session_id, {
+      duration_seconds: 10,
+      transcript: [{ role: "user", text: "hola" }],
+      metrics,
+      evaluation,
+    });
+
+    const result = await markEvaluationFailed(s.session_id, "OPENROUTER_TIMEOUT");
+    expect(result).toEqual({ applied: false, currentStatus: "completed" });
+
+    const after = await getSessionById(s.session_id);
+    expect(after?.status).toBe("completed");
+    expect(after?.evaluation).toEqual(evaluation);
+  });
+
+  it("2. completed + markPersistenceFailed -> still completed (rejected, not applied)", async () => {
+    const s = newSession();
+    await createSession(s);
+    await claimSessionForEvaluation({ sessionId: s.session_id, ownerUid: "uid-1", organizationId: "org-1" });
+    await persistCompletedResult(s.session_id, {
+      duration_seconds: 10,
+      transcript: [{ role: "user", text: "hola" }],
+      metrics,
+      evaluation,
+    });
+
+    const result = await markPersistenceFailed(s.session_id, "FIRESTORE_WRITE_FAILED");
+    expect(result).toEqual({ applied: false, currentStatus: "completed" });
+
+    const after = await getSessionById(s.session_id);
+    expect(after?.status).toBe("completed");
+    expect(after?.metrics).toEqual(metrics);
+  });
+
+  it("3. abandoned + persistCompletedResult -> rejected, stays abandoned", async () => {
+    const s = newSession();
+    await createSession(s);
+    const abandon = await markAbandoned(s.session_id);
+    expect(abandon.outcome).toBe("abandoned");
+
+    const result = await persistCompletedResult(s.session_id, {
+      duration_seconds: 10,
+      transcript: [{ role: "user", text: "hola" }],
+      metrics,
+      evaluation,
+    });
+    expect(result).toEqual({ applied: false, currentStatus: "abandoned" });
+
+    const after = await getSessionById(s.session_id);
+    expect(after?.status).toBe("abandoned");
+    expect(after?.evaluation).toBeUndefined();
+  });
+
+  it("4. evaluation_failed + persistCompletedResult without a new claim -> rejected", async () => {
+    const s = newSession();
+    await createSession(s);
+    await claimSessionForEvaluation({ sessionId: s.session_id, ownerUid: "uid-1", organizationId: "org-1" });
+    await markEvaluationFailed(s.session_id, "OPENROUTER_5XX");
+
+    const result = await persistCompletedResult(s.session_id, {
+      duration_seconds: 10,
+      transcript: [{ role: "user", text: "hola" }],
+      metrics,
+      evaluation,
+    });
+    expect(result).toEqual({ applied: false, currentStatus: "evaluation_failed" });
+
+    const after = await getSessionById(s.session_id);
+    expect(after?.status).toBe("evaluation_failed");
+    expect(after?.evaluation).toBeUndefined();
+  });
+
+  it("5. completed + a later attempt to mark persistence_failed leaves the persisted result fully intact", async () => {
+    const s = newSession();
+    await createSession(s);
+    await claimSessionForEvaluation({ sessionId: s.session_id, ownerUid: "uid-1", organizationId: "org-1" });
+    await persistCompletedResult(s.session_id, {
+      duration_seconds: 55,
+      transcript: [{ role: "user", text: "el pitch completo" }],
+      metrics,
+      evaluation,
+    });
+    const before = await getSessionById(s.session_id);
+
+    // Simulates the "ambiguous ack" case: caller thinks the write failed
+    // and tries to mark persistence_failed anyway.
+    const result = await markPersistenceFailed(s.session_id, "FIRESTORE_WRITE_FAILED");
+    expect(result).toEqual({ applied: false, currentStatus: "completed" });
+
+    const after = await getSessionById(s.session_id);
+    expect(after).toEqual(before); // byte-for-byte unchanged
+    expect(after?.status).toBe("completed");
+    expect(after?.evaluation).toEqual(evaluation);
+    expect(after?.metrics).toEqual(metrics);
+    expect(after?.duration_seconds).toBe(55);
+  });
+
+  it("still applies normally from evaluating (the common, non-conflicting case)", async () => {
+    const s = newSession();
+    await createSession(s);
+    await claimSessionForEvaluation({ sessionId: s.session_id, ownerUid: "uid-1", organizationId: "org-1" });
+
+    const result = await persistCompletedResult(s.session_id, {
+      duration_seconds: 20,
+      transcript: [{ role: "user", text: "hola" }],
+      metrics,
+      evaluation,
+    });
+    expect(result).toEqual({ applied: true });
+  });
+
+  it("reports currentStatus: null for a session that doesn't exist at all", async () => {
+    const result = await markEvaluationFailed("does-not-exist", "OPENROUTER_TIMEOUT");
+    expect(result).toEqual({ applied: false, currentStatus: null });
+  });
+});

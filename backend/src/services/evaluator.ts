@@ -35,6 +35,28 @@ function isTransientStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
+// Safe, operational failure categories (PASS_WITH_FIXES round). These —
+// never the raw OpenRouter response body/message — are what gets
+// persisted as SessionRecord.failure_reason (see
+// repositories/sessions.ts). The raw detail stays in EvaluationError's
+// own `.message`, which routes.ts logs via console.error but never
+// writes to Firestore or returns to the client.
+export type EvaluationFailureCategory =
+  | "OPENROUTER_TIMEOUT"
+  | "OPENROUTER_NETWORK_ERROR"
+  | "OPENROUTER_RATE_LIMITED"
+  | "OPENROUTER_5XX"
+  | "OPENROUTER_4XX"
+  | "OPENROUTER_EMPTY_RESPONSE"
+  | "OPENROUTER_INVALID_JSON"
+  | "OPENROUTER_UNKNOWN_ERROR";
+
+function categoryForStatus(status: number): EvaluationFailureCategory {
+  if (status === 429) return "OPENROUTER_RATE_LIMITED";
+  if (status >= 500) return "OPENROUTER_5XX";
+  return "OPENROUTER_4XX";
+}
+
 // Pull the first balanced JSON object out of a model response, tolerating
 // stray prose or code fences even though we asked for pure JSON.
 function extractJson(raw: string): string {
@@ -100,19 +122,28 @@ async function attemptEvaluation(
     if (err instanceof Error && err.name === "AbortError") {
       throw new EvaluationError(
         `OpenRouter evaluation timed out after ${EVALUATION_TIMEOUT_MS}ms`,
-        true
+        true,
+        "OPENROUTER_TIMEOUT"
       );
     }
-    throw new EvaluationError(`OpenRouter request failed: ${(err as Error).message}`, true);
+    throw new EvaluationError(
+      `OpenRouter request failed: ${(err as Error).message}`,
+      true,
+      "OPENROUTER_NETWORK_ERROR"
+    );
   } finally {
     clearTimeout(timer);
   }
 
   if (!res.ok) {
+    // The raw response body can be arbitrary upstream text — it goes into
+    // .message (routes.ts logs it, never persists or returns it), never
+    // into the category.
     const body = await res.text();
     throw new EvaluationError(
       `OpenRouter evaluation failed (${res.status}): ${body.slice(0, 400)}`,
-      isTransientStatus(res.status)
+      isTransientStatus(res.status),
+      categoryForStatus(res.status)
     );
   }
 
@@ -121,7 +152,7 @@ async function attemptEvaluation(
   };
   const content = data.choices?.[0]?.message?.content ?? "";
   if (!content) {
-    throw new EvaluationError("OpenRouter returned empty content", false);
+    throw new EvaluationError("OpenRouter returned empty content", false, "OPENROUTER_EMPTY_RESPONSE");
   }
 
   let parsed: EvaluationResult;
@@ -130,7 +161,8 @@ async function attemptEvaluation(
   } catch (err) {
     throw new EvaluationError(
       `No se pudo parsear el JSON del evaluador: ${(err as Error).message}`,
-      false // not transient — retrying won't change how the model formats it
+      false, // not transient — retrying won't change how the model formats it
+      "OPENROUTER_INVALID_JSON"
     );
   }
 
@@ -140,13 +172,18 @@ async function attemptEvaluation(
 }
 
 // Distinguishes transient (worth one bounded retry) from non-transient
-// failures, without leaking that distinction past this module.
-class EvaluationError extends Error {
+// failures, and carries a safe category for persistence — without
+// leaking the raw message past where it's meant to be logged. Exported
+// so routes.ts can read `.category` without needing to know about
+// EvaluationError's internals otherwise.
+export class EvaluationError extends Error {
   transient: boolean;
-  constructor(message: string, transient: boolean) {
+  category: EvaluationFailureCategory;
+  constructor(message: string, transient: boolean, category: EvaluationFailureCategory) {
     super(message);
     this.name = "EvaluationError";
     this.transient = transient;
+    this.category = category;
   }
 }
 
@@ -171,7 +208,9 @@ export async function evaluatePitch(params: {
       return await attemptEvaluation(userMessage, params.target, params.sessionId);
     } catch (err) {
       const evalErr =
-        err instanceof EvaluationError ? err : new EvaluationError((err as Error).message, false);
+        err instanceof EvaluationError
+          ? err
+          : new EvaluationError((err as Error).message, false, "OPENROUTER_UNKNOWN_ERROR");
       lastError = evalErr;
       if (evalErr.transient && attempt < MAX_TRANSIENT_RETRIES) {
         await sleep(RETRY_BACKOFF_MS);

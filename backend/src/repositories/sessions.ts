@@ -187,78 +187,130 @@ export async function claimSessionForEvaluation(params: {
   });
 }
 
-// evaluating -> evaluation_failed. Only called right after a successful
-// claim, by the same request that holds it — no transaction needed here
-// (nothing else can be racing against a session already in "evaluating").
-export async function markEvaluationFailed(sessionId: string, reason: string): Promise<void> {
-  const failure_reason = sanitizeFailureReason(reason);
+// ─────────────────────────────────────────────────────────────
+// GUARDED EXITS FROM "evaluating" (PASS_WITH_FIXES round)
+//
+// persistCompletedResult / markEvaluationFailed / markPersistenceFailed
+// used to write directly, with no precondition — they could overwrite
+// ANY status, contradicting VALID_TRANSITIONS. The review caught a real
+// case: persistCompletedResult's write actually lands in Firestore
+// (status -> completed) but the client of THIS module (routes.ts) gets a
+// thrown error anyway (an ambiguous ack — e.g. a network blip after the
+// write committed). The old code would then call markPersistenceFailed,
+// which would happily downgrade completed -> persistence_failed and
+// DISCARD an already-saved result.
+//
+// Fix: every exit from "evaluating" goes through applyFromEvaluating,
+// which only writes if the CURRENT status is exactly "evaluating" —
+// enforced via a Firestore transaction (real precondition, not a
+// best-effort check) or the equivalent compare-and-set in the memory
+// fallback. Any other current status is preserved untouched and reported
+// back via `currentStatus`, never silently overwritten.
+// ─────────────────────────────────────────────────────────────
+
+export type EvaluatingExitResult =
+  | { applied: true }
+  // `currentStatus: null` means the session doesn't exist at all (should
+  // not happen in the normal flow — these are only ever called right
+  // after a successful claim — but handled defensively rather than
+  // assumed away).
+  | { applied: false; currentStatus: SessionStatus | null };
+
+async function applyFromEvaluating(
+  sessionId: string,
+  buildUpdate: () => Record<string, unknown>
+): Promise<EvaluatingExitResult> {
   if (!isPersistenceEnabled()) {
     const existing = memoryStore.get(sessionId);
-    if (existing) {
-      memoryStore.set(sessionId, {
-        ...existing,
-        status: "evaluation_failed",
-        failure_reason,
-        updated_at: nowIso(),
-      });
+    if (!existing) return { applied: false, currentStatus: null };
+    if (existing.status !== "evaluating") {
+      return { applied: false, currentStatus: existing.status };
     }
-    console.log("[sessions:log] evaluation_failed", sessionId, failure_reason);
-    return;
+    memoryStore.set(sessionId, { ...existing, ...buildUpdate(), updated_at: nowIso() } as SessionRecord);
+    return { applied: true };
   }
-  await db()
-    .doc(sessionId)
-    .set(
-      {
-        status: "evaluation_failed",
-        failure_reason,
-        updated_at: admin.firestore.FieldValue.serverTimestamp(),
-      },
+
+  const ref = db().doc(sessionId);
+  return admin.firestore().runTransaction(async (tx): Promise<EvaluatingExitResult> => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return { applied: false, currentStatus: null };
+    const session = parseSessionRecord(snap.id, snap.data());
+    if (!session) return { applied: false, currentStatus: null };
+    if (session.status !== "evaluating") {
+      return { applied: false, currentStatus: session.status };
+    }
+    tx.set(
+      ref,
+      { ...buildUpdate(), updated_at: admin.firestore.FieldValue.serverTimestamp() },
       { merge: true }
     );
+    return { applied: true };
+  });
 }
 
-// evaluating -> persistence_failed. Deliberately its OWN small write
+// evaluating -> evaluation_failed ONLY. Any other current status (most
+// importantly `completed`) is preserved untouched.
+export async function markEvaluationFailed(
+  sessionId: string,
+  reason: string
+): Promise<EvaluatingExitResult> {
+  // `reason` is expected to already be a short, safe category (e.g.
+  // "OPENROUTER_TIMEOUT") — see FAILURE_REASON_TAXONOMY in
+  // PHASE_04_SESSION_LIFECYCLE_REPORT.md. Truncation here is a second,
+  // cheap backstop, not the primary sanitization.
+  const failure_reason = sanitizeFailureReason(reason);
+  const result = await applyFromEvaluating(sessionId, () => ({
+    status: "evaluation_failed",
+    failure_reason,
+  }));
+  if (result.applied) {
+    console.log("[sessions:log] evaluation_failed", sessionId, failure_reason);
+  } else {
+    console.warn(
+      `[sessions] markEvaluationFailed(${sessionId}) rechazado: status actual es ` +
+        `"${result.currentStatus ?? "desconocido"}", no "evaluating" — no se sobrescribió nada.`
+    );
+  }
+  return result;
+}
+
+// evaluating -> persistence_failed ONLY. Deliberately its own small write
 // (status + reason only, no transcript/metrics/evaluation payload) — if
 // the FULL result write in persistCompletedResult failed, a smaller write
-// has a better chance of succeeding (e.g. the failure was payload-size or
-// a transient blip), and there's no result to attach anyway: it was never
-// durably saved. See PERSISTENCE_FAILURE_MODEL in
-// PHASE_04_SESSION_LIFECYCLE_REPORT.md for why this can still fail too
-// (documented as a KNOWN_LIMITATION, not silently swallowed).
-export async function markPersistenceFailed(sessionId: string, reason: string): Promise<void> {
+// has a better chance of succeeding, and there's no result to attach
+// anyway in the genuine-failure case. But see the guard above: if the
+// original write actually DID land (status is already `completed`), this
+// call is REJECTED and completed is preserved — the whole point of this
+// round's fix.
+export async function markPersistenceFailed(
+  sessionId: string,
+  reason: string
+): Promise<EvaluatingExitResult> {
   const failure_reason = sanitizeFailureReason(reason);
-  if (!isPersistenceEnabled()) {
-    const existing = memoryStore.get(sessionId);
-    if (existing) {
-      memoryStore.set(sessionId, {
-        ...existing,
-        status: "persistence_failed",
-        failure_reason,
-        updated_at: nowIso(),
-      });
-    }
+  const result = await applyFromEvaluating(sessionId, () => ({
+    status: "persistence_failed",
+    failure_reason,
+  }));
+  if (result.applied) {
     console.log("[sessions:log] persistence_failed", sessionId, failure_reason);
-    return;
-  }
-  await db()
-    .doc(sessionId)
-    .set(
-      {
-        status: "persistence_failed",
-        failure_reason,
-        updated_at: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
+  } else {
+    console.warn(
+      `[sessions] markPersistenceFailed(${sessionId}) rechazado: status actual es ` +
+        `"${result.currentStatus ?? "desconocido"}", no "evaluating" — no se sobrescribió nada ` +
+        `(si es "completed", el resultado original se conserva intacto).`
     );
+  }
+  return result;
 }
 
-// evaluating -> completed. The ONE write that makes a session durably
-// "done" — transcript + metrics + evaluation land together with the
-// status flip, in a single Firestore `set()`, so a reader can never see
-// status:"completed" without the result already there (a single
-// document write is atomic; there is no partial-apply state). If this
-// throws, the caller (routes.ts) MUST call markPersistenceFailed and MUST
-// NOT report success to the client — see PERSISTENCE_FAILURE_MODEL.
+// evaluating -> completed ONLY. The one write that makes a session
+// durably "done" — transcript + metrics + evaluation land together with
+// the status flip, in a single Firestore transactional write, so a
+// reader can never see status:"completed" without the result already
+// there. If this throws, the caller (routes.ts) MUST call
+// markPersistenceFailed and MUST NOT report success to the client — see
+// PERSISTENCE_FAILURE_MODEL. If it returns `applied: false`, the current
+// status (whatever it is) was preserved untouched.
 export async function persistCompletedResult(
   sessionId: string,
   params: {
@@ -267,7 +319,7 @@ export async function persistCompletedResult(
     metrics: SpeechMetrics;
     evaluation: EvaluationResult;
   }
-): Promise<void> {
+): Promise<EvaluatingExitResult> {
   const full = params.transcript
     .map((t) => `${t.role === "user" ? "SANDRA" : "AGENTE"}: ${t.text}`)
     .join("\n");
@@ -281,38 +333,23 @@ export async function persistCompletedResult(
     .join("\n");
   const transcript = { full, user_only: userOnly, agent_only: agentOnly };
 
-  if (!isPersistenceEnabled()) {
-    const existing = memoryStore.get(sessionId);
-    if (existing) {
-      memoryStore.set(sessionId, {
-        ...existing,
-        status: "completed",
-        ended_at: nowIso(),
-        duration_seconds: params.duration_seconds,
-        transcript,
-        metrics: params.metrics,
-        evaluation: params.evaluation,
-        updated_at: nowIso(),
-      });
-    }
+  const result = await applyFromEvaluating(sessionId, () => ({
+    status: "completed",
+    ended_at: nowIso(),
+    duration_seconds: params.duration_seconds,
+    transcript,
+    metrics: params.metrics,
+    evaluation: params.evaluation,
+  }));
+  if (result.applied) {
     console.log("[sessions:log] completed", sessionId, { overall: params.evaluation.overall_score });
-    return;
-  }
-
-  await db()
-    .doc(sessionId)
-    .set(
-      {
-        status: "completed",
-        ended_at: nowIso(),
-        duration_seconds: params.duration_seconds,
-        transcript,
-        metrics: params.metrics,
-        evaluation: params.evaluation,
-        updated_at: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
+  } else {
+    console.warn(
+      `[sessions] persistCompletedResult(${sessionId}) rechazado: status actual es ` +
+        `"${result.currentStatus ?? "desconocido"}", no "evaluating" — no se sobrescribió nada.`
     );
+  }
+  return result;
 }
 
 // in_progress -> abandoned. NOT wired to any HTTP route or scheduler in

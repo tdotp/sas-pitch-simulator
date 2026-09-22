@@ -19,7 +19,7 @@ vi.mock("../data/evaluatorPrompt.js", () => ({
   buildEvaluatorUserMessage: () => "user message",
 }));
 
-const { evaluatePitch } = await import("./evaluator.js");
+const { evaluatePitch, EvaluationError } = await import("./evaluator.js");
 
 function jsonResponse(body: unknown, ok = true, status = 200) {
   return {
@@ -106,6 +106,107 @@ describe("evaluatePitch", () => {
 
     await expect(evaluatePitch(baseParams)).rejects.toThrow(/400/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // PASS_WITH_FIXES: routes.ts persists only a safe category as
+  // failure_reason (never the raw OpenRouter body) — verify the
+  // classification is correct for the cases that matter operationally.
+  it("classifies a timeout as OPENROUTER_TIMEOUT", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockImplementation((_url: string, init?: { signal?: AbortSignal }) => {
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          const err = new Error("aborted");
+          err.name = "AbortError";
+          reject(err);
+        });
+      });
+    });
+
+    vi.useFakeTimers();
+    // Attach the rejection handler synchronously, before any timer
+    // advance runs — otherwise Node can briefly see the eventual
+    // rejection as "unhandled" (it's handled a tick later by the
+    // try/catch below), which vitest treats as a real test error even
+    // though the test itself passes.
+    const outcome = evaluatePitch(baseParams).then(
+      (value) => ({ ok: true as const, value }),
+      (err: unknown) => ({ ok: false as const, err })
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(30_000);
+    const result = await outcome;
+    vi.useRealTimers();
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.err).toBeInstanceOf(EvaluationError);
+      expect((result.err as InstanceType<typeof EvaluationError>).category).toBe("OPENROUTER_TIMEOUT");
+    }
+  });
+
+  it("classifies a 503 as OPENROUTER_5XX and a 429 as OPENROUTER_RATE_LIMITED", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(jsonResponse({ error: "down" }, false, 503));
+    let caught: unknown;
+    try {
+      await evaluatePitch(baseParams);
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as InstanceType<typeof EvaluationError>).category).toBe("OPENROUTER_5XX");
+
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue(jsonResponse({ error: "rate limited" }, false, 429));
+    caught = undefined;
+    try {
+      await evaluatePitch(baseParams);
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as InstanceType<typeof EvaluationError>).category).toBe("OPENROUTER_RATE_LIMITED");
+  });
+
+  it("classifies a non-429 4xx as OPENROUTER_4XX and a JSON parse failure as OPENROUTER_INVALID_JSON", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "bad request" }, false, 400));
+    let caught: unknown;
+    try {
+      await evaluatePitch(baseParams);
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as InstanceType<typeof EvaluationError>).category).toBe("OPENROUTER_4XX");
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ choices: [{ message: { content: "not valid json {{{" } }] })
+    );
+    caught = undefined;
+    try {
+      await evaluatePitch(baseParams);
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as InstanceType<typeof EvaluationError>).category).toBe("OPENROUTER_INVALID_JSON");
+  });
+
+  it("the thrown error's message may carry raw upstream detail, but the category never does", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    // mockResolvedValue (not Once): a 500 is transient, so evaluatePitch
+    // retries once — both attempts need a response queued.
+    fetchMock.mockResolvedValue(
+      jsonResponse({ error: "sensitive upstream detail: internal-host-123" }, false, 500)
+    );
+    let caught: unknown;
+    try {
+      await evaluatePitch(baseParams);
+    } catch (err) {
+      caught = err;
+    }
+    const evalErr = caught as InstanceType<typeof EvaluationError>;
+    expect(evalErr.category).toBe("OPENROUTER_5XX");
+    expect(evalErr.category).not.toContain("internal-host-123");
   });
 
   it("does NOT retry a JSON parse failure", async () => {

@@ -17,7 +17,7 @@ import { requireAnyRole } from "./middleware/roles.js";
 import type { SessionRecord, StartSessionRequest, TargetMode, TranscriptTurn } from "./types.js";
 import { getSignedUrl } from "./services/elevenlabs.js";
 import { computeMetrics } from "./services/metrics.js";
-import { evaluatePitch } from "./services/evaluator.js";
+import { evaluatePitch, EvaluationError } from "./services/evaluator.js";
 import { isAuthReady } from "./firebase.js";
 import {
   createSession,
@@ -25,6 +25,7 @@ import {
   markEvaluationFailed,
   markPersistenceFailed,
   persistCompletedResult,
+  getSessionById,
   listSessionsByOrganization,
 } from "./repositories/sessions.js";
 
@@ -246,37 +247,86 @@ router.post(
         metrics,
       });
     } catch (err) {
-      const reason = (err as Error).message;
-      console.error("[/session/end] evaluatePitch falló:", reason);
-      try {
-        await markEvaluationFailed(session_id, reason);
-      } catch (markErr) {
+      // Safe category only (e.g. "OPENROUTER_TIMEOUT") gets persisted as
+      // failure_reason — the raw message (which can embed an upstream
+      // response body) is logged, never written to Firestore or returned
+      // to the client. See FAILURE_REASON_TAXONOMY in
+      // PHASE_04_SESSION_LIFECYCLE_REPORT.md.
+      const category = err instanceof EvaluationError ? err.category : "OPENROUTER_UNKNOWN_ERROR";
+      console.error("[/session/end] evaluatePitch falló:", (err as Error).message);
+      const marked = await markEvaluationFailed(session_id, category).catch((markErr: unknown) => {
         // The session is stuck in "evaluating" if even this fails — same
         // class of recoverable-but-stuck state as an abandoned session;
         // see KNOWN_LIMITATIONS in PHASE_04_SESSION_LIFECYCLE_REPORT.md.
-        console.error("[/session/end] markEvaluationFailed también falló:", (markErr as Error).message);
+        console.error(
+          "[/session/end] markEvaluationFailed también falló:",
+          (markErr as Error).message
+        );
+        return null;
+      });
+      if (marked && !marked.applied) {
+        console.warn(
+          `[/session/end] markEvaluationFailed no se aplicó para ${session_id} ` +
+            `(status actual: ${marked.currentStatus ?? "desconocido"}) — se preservó ese estado.`
+        );
       }
       return res.status(502).json({ error: "No se pudo evaluar la sesión. Intenta de nuevo más tarde." });
     }
 
     try {
-      await persistCompletedResult(session_id, {
+      const persisted = await persistCompletedResult(session_id, {
         duration_seconds: duration,
         transcript,
         metrics,
         evaluation,
       });
-    } catch (err) {
-      console.error("[/session/end] persistCompletedResult falló:", (err as Error).message);
-      try {
-        await markPersistenceFailed(session_id, (err as Error).message);
-      } catch (markErr) {
-        console.error("[/session/end] markPersistenceFailed también falló:", (markErr as Error).message);
+      if (!persisted.applied) {
+        // The transactional guard refused the write because the session
+        // was no longer "evaluating" by the time this ran (should not
+        // happen in the normal flow — we hold the claim exclusively —
+        // but never silently pretend success either way).
+        console.error(
+          `[/session/end] persistCompletedResult no se aplicó para ${session_id} ` +
+            `(status actual: ${persisted.currentStatus ?? "desconocido"}).`
+        );
+        return res.status(503).json({ error: "No se pudo guardar tu resultado. Intenta de nuevo." });
       }
-      // Deliberately NOT 200: the evaluation ran, but nothing durable
-      // exists to back that up yet — the client must not be told this
-      // succeeded. A retry will re-claim (persistence_failed is
-      // claimable) and re-run the evaluation, since nothing was saved.
+    } catch (err) {
+      // AMBIGUOUS FAILURE (PASS_WITH_FIXES round): persistCompletedResult
+      // threw, but its write may have actually landed in Firestore before
+      // the error surfaced (e.g. the commit succeeded and only the
+      // acknowledgment was lost to a network blip). markPersistenceFailed
+      // is guarded to NEVER downgrade an already-"completed" session — so
+      // if that guard reports the current status is already "completed",
+      // the original write DID succeed: recover and return the real
+      // persisted result instead of lying to the client about a failure.
+      console.error("[/session/end] persistCompletedResult falló:", (err as Error).message);
+      const marked = await markPersistenceFailed(session_id, "FIRESTORE_WRITE_FAILED").catch(
+        (markErr: unknown) => {
+          console.error(
+            "[/session/end] markPersistenceFailed también falló:",
+            (markErr as Error).message
+          );
+          return null;
+        }
+      );
+
+      if (marked && !marked.applied && marked.currentStatus === "completed") {
+        const recovered = await getSessionById(session_id).catch(() => null);
+        if (recovered?.metrics && recovered?.evaluation) {
+          return res.json({
+            session_id,
+            target_mode: recovered.target_mode,
+            metrics: recovered.metrics,
+            evaluation: recovered.evaluation,
+          });
+        }
+      }
+
+      // Deliberately NOT 200 otherwise: as far as we can tell, nothing
+      // durable backs this evaluation. A retry will re-claim
+      // (persistence_failed is claimable) and re-run the evaluation,
+      // since nothing was saved.
       return res.status(503).json({ error: "No se pudo guardar tu resultado. Intenta de nuevo." });
     }
 

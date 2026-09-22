@@ -47,8 +47,20 @@ const evaluatePitchMock = vi.fn(async () => ({
   target_mode: "generic",
   overall_score: 5,
 }));
+class EvaluationErrorMock extends Error {
+  transient: boolean;
+  category: string;
+  constructor(message: string, transient: boolean, category: string) {
+    super(message);
+    this.name = "EvaluationError";
+    this.transient = transient;
+    this.category = category;
+  }
+}
+
 vi.mock("./services/evaluator.js", () => ({
   evaluatePitch: (...args: unknown[]) => evaluatePitchMock(...args),
+  EvaluationError: EvaluationErrorMock,
 }));
 
 vi.mock("./firebase.js", () => ({
@@ -64,6 +76,10 @@ vi.mock("./firebase.js", () => ({
 // outcome, including injecting a persistence failure on demand.
 const sessionsStore = new Map<string, Record<string, unknown>>();
 let persistCompletedResultShouldFail = false;
+// When true alongside persistCompletedResultShouldFail, simulates the
+// "ambiguous ack" case: the Firestore write actually lands (status
+// becomes completed) before persistCompletedResult still throws.
+let persistCompletedResultSecretlySucceeds = false;
 
 vi.mock("./repositories/sessions.js", () => ({
   createSession: vi.fn(async (session: Record<string, unknown>) => {
@@ -89,36 +105,60 @@ vi.mock("./repositories/sessions.js", () => ({
       return { outcome: "wrong_state" as const, status: session.status };
     }
   ),
+  // Guarded exactly like the real repository (PASS_WITH_FIXES round):
+  // only applies from "evaluating"; any other current status is
+  // preserved and reported back via currentStatus, never overwritten.
   markEvaluationFailed: vi.fn(async (sessionId: string, reason: string) => {
     const s = sessionsStore.get(sessionId);
-    if (s) sessionsStore.set(sessionId, { ...s, status: "evaluation_failed", failure_reason: reason });
+    if (!s) return { applied: false, currentStatus: null };
+    if (s.status !== "evaluating") return { applied: false, currentStatus: s.status };
+    sessionsStore.set(sessionId, { ...s, status: "evaluation_failed", failure_reason: reason });
+    return { applied: true };
   }),
   markPersistenceFailed: vi.fn(async (sessionId: string, reason: string) => {
     const s = sessionsStore.get(sessionId);
-    if (s) sessionsStore.set(sessionId, { ...s, status: "persistence_failed", failure_reason: reason });
+    if (!s) return { applied: false, currentStatus: null };
+    if (s.status !== "evaluating") return { applied: false, currentStatus: s.status };
+    sessionsStore.set(sessionId, { ...s, status: "persistence_failed", failure_reason: reason });
+    return { applied: true };
   }),
   persistCompletedResult: vi.fn(
     async (
       sessionId: string,
       params: { duration_seconds: number; transcript: unknown; metrics: unknown; evaluation: unknown }
     ) => {
+      const s = sessionsStore.get(sessionId);
       if (persistCompletedResultShouldFail) {
+        if (persistCompletedResultSecretlySucceeds && s) {
+          // Simulates the "ambiguous ack" case: the write actually lands
+          // before the throw.
+          sessionsStore.set(sessionId, {
+            ...s,
+            status: "completed",
+            duration_seconds: params.duration_seconds,
+            metrics: params.metrics,
+            evaluation: params.evaluation,
+            transcript: { full: "...", user_only: "...", agent_only: "..." },
+            ended_at: new Date().toISOString(),
+          });
+        }
         throw new Error("simulated Firestore write failure");
       }
-      const s = sessionsStore.get(sessionId);
-      if (s) {
-        sessionsStore.set(sessionId, {
-          ...s,
-          status: "completed",
-          duration_seconds: params.duration_seconds,
-          metrics: params.metrics,
-          evaluation: params.evaluation,
-          transcript: { full: "...", user_only: "...", agent_only: "..." },
-          ended_at: new Date().toISOString(),
-        });
-      }
+      if (!s) return { applied: false, currentStatus: null };
+      if (s.status !== "evaluating") return { applied: false, currentStatus: s.status };
+      sessionsStore.set(sessionId, {
+        ...s,
+        status: "completed",
+        duration_seconds: params.duration_seconds,
+        metrics: params.metrics,
+        evaluation: params.evaluation,
+        transcript: { full: "...", user_only: "...", agent_only: "..." },
+        ended_at: new Date().toISOString(),
+      });
+      return { applied: true };
     }
   ),
+  getSessionById: vi.fn(async (sessionId: string) => sessionsStore.get(sessionId) ?? null),
   listSessionsByOrganization: vi.fn(async (organizationId: string) =>
     [...sessionsStore.values()].filter((s) => s.organization_id === organizationId)
   ),
@@ -161,6 +201,7 @@ beforeEach(() => {
   getOrganizationMock.mockReset();
   sessionsStore.clear();
   persistCompletedResultShouldFail = false;
+  persistCompletedResultSecretlySucceeds = false;
   evaluatePitchMock.mockReset();
   evaluatePitchMock.mockResolvedValue({
     session_id: "evaluated",
@@ -579,6 +620,34 @@ describe("Phase 4: session lifecycle", () => {
     const stored = sessionsStore.get(sessionId);
     expect(stored?.status).toBe("persistence_failed");
     expect(stored?.status).not.toBe("completed");
+  });
+
+  it("PASS_WITH_FIXES: an ambiguous persistence ack (write actually succeeded) recovers and returns the real persisted result instead of a false failure", async () => {
+    const app = buildApp();
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const startRes = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    const sessionId = startRes.body.session_id as string;
+
+    // persistCompletedResult's write actually lands (status -> completed)
+    // but the call still throws (e.g. the ack was lost to a network
+    // blip). markPersistenceFailed's guard must refuse to downgrade
+    // completed -> persistence_failed, and routes.ts must recover and
+    // return the real result instead of reporting a false failure.
+    persistCompletedResultShouldFail = true;
+    persistCompletedResultSecretlySucceeds = true;
+
+    const endRes = await request(app)
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({ session_id: sessionId, duration_seconds: 10, transcript: [{ role: "user", text: "hola" }] });
+
+    expect(endRes.status).toBe(200);
+    expect(endRes.body.evaluation).toBeTruthy();
+    const stored = sessionsStore.get(sessionId);
+    expect(stored?.status).toBe("completed");
   });
 
   it("an invalid transition (claiming an abandoned session) is rejected with 409", async () => {
