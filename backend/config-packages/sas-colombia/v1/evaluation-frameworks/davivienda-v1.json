@@ -1,0 +1,53 @@
+{
+  "id": "davivienda-v1",
+  "name": "Rúbrica CEO Davivienda / Javier José Suárez",
+  "maxScore": 100,
+  "criteria": [
+    { "id": "strategic_context", "name": "Contexto estratégico", "weight": 15, "description": "Entiende la agenda Scotiabank, Davivienda Group, DAVIbank e integración regional." },
+    { "id": "daviplata_relevance", "name": "Relevancia DaviPlata", "weight": 10, "description": "Conecta DaviPlata con rentabilidad, crédito, recurrencia, fraude o collections; no la trata solo como wallet." },
+    { "id": "payments_fraud_depth", "name": "Profundidad pagos/fraude", "weight": 10, "description": "Aterriza pagos, Bre-B, ePayco, adquirencia, fraude transaccional y falsos positivos." },
+    { "id": "risk_governance", "name": "Gobierno de riesgo", "weight": 15, "description": "Habla de gobierno de modelos, monitoreo, líneas de defensa, drift, auditoría y regulación." },
+    { "id": "use_of_public_data", "name": "Uso de datos públicos", "weight": 10, "description": "Usa cifras públicas correctas y recientes sobre Davivienda, DaviPlata, digitalización, clientes, cartera, pagos o sector financiero." },
+    { "id": "implementation_logic", "name": "Lógica de implementación", "weight": 10, "description": "Propone quick wins, secuencia de despliegue y convivencia con capacidades existentes. Evita big bang." },
+    { "id": "sas_differentiation", "name": "Diferenciación SAS", "weight": 10, "description": "Explica por qué SAS aporta más que un modelo aislado, hyperscaler o desarrollo interno: decisioning, gobierno, analítica y trazabilidad." },
+    { "id": "economic_impact", "name": "Impacto económico", "weight": 10, "description": "Conecta la propuesta con pérdida evitada, provisión, conversión, eficiencia, aprobación, capital o rentabilidad ajustada por riesgo." },
+    { "id": "return_questions", "name": "Preguntas de retorno", "weight": 5, "description": "Formula preguntas inteligentes para descubrir sponsor, KPI base, dolor prioritario u ownership." },
+    { "id": "credibility", "name": "Credibilidad", "weight": 5, "description": "Evita especular, no atribuye preferencias privadas y reconoce límites de datos o implementación." }
+  ],
+  "observableRules": [
+    "menciona Scotiabank, Davivienda Group o integración regional temprano",
+    "reconoce que existen Banco Davivienda y Davivienda Group cuando sea relevante",
+    "conecta DaviPlata con rentabilidad, crédito, recurrencia, fraude o collections",
+    "no habla de IA sin mencionar gobierno, monitoreo o trazabilidad",
+    "si habla de fraude, menciona falsos positivos o fricción",
+    "si habla de pagos, menciona tiempo real o interoperabilidad",
+    "pregunta por métricas base antes de prometer impacto",
+    "evita prometer reemplazo total del stack actual",
+    "usa al menos una cifra pública verificable",
+    "vincula la propuesta con P&L, riesgo, capital o eficiencia",
+    "no atribuye opiniones privadas a Javier Suárez",
+    "mantiene tono ejecutivo y técnico"
+  ],
+  "durationPolicy": {
+    "idealSeconds": 90,
+    "maxSeconds": 180,
+    "scoring": { "lte_90": 100, "lte_120": 80, "lte_150": 60, "lte_180": 40, "gt_180": 0 }
+  },
+  "mustReward": [
+    "quick wins de 90 a 180 días",
+    "gobierno multi-país",
+    "fraude evitado y falsos positivos",
+    "DaviPlata rentable",
+    "ePayco y merchant risk",
+    "orquestación de decisiones"
+  ],
+  "mustPenalize": [
+    "transformación digital genérica",
+    "IA sin gobierno",
+    "prometer automatización sin supervisión",
+    "no conectar con integración regional",
+    "no incluir cifra",
+    "no incluir CTA"
+  ],
+  "evaluationInstructions": "No atribuyas opiniones privadas a Javier Suárez — evalúa contra la agenda PÚBLICA de Davivienda/Davivienda Group. Prioriza si el pitch conecta con integración regional, DaviPlata, pagos/fraude, gobierno de riesgo y valor económico medible."
+}

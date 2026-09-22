@@ -14,8 +14,8 @@ vi.mock("../config.js", () => ({
   },
 }));
 
-vi.mock("../data/evaluatorPrompt.js", () => ({
-  EVALUATOR_SYSTEM_PROMPT: "system prompt",
+vi.mock("../engine/evaluatorPromptBuilder.js", () => ({
+  buildEvaluatorSystemPrompt: () => "system prompt",
   buildEvaluatorUserMessage: () => "user message",
 }));
 
@@ -36,9 +36,50 @@ function okOpenRouterResponse(overall_score = 80) {
   });
 }
 
+// Phase 5: evaluatePitch takes a resolved scenario config, not a
+// TargetMode — this file only needs a minimal fixture since
+// buildEvaluatorSystemPrompt/buildEvaluatorUserMessage are mocked above
+// (they're tested for real in engine/evaluatorPromptBuilder.test.ts).
+const minimalResolved = {
+  organizationId: "org-test",
+  client: { organizationId: "org-test", defaultLanguage: "es", settings: {} },
+  scenario: {
+    id: "generic",
+    name: "Generic",
+    description: "d",
+    interviewerProfileId: "p1",
+    evaluationFrameworkId: "f1",
+    contentSourceIds: [],
+    timing: { idealSeconds: 90, maxSeconds: 180 },
+    firstMessage: "hi",
+    openingContext: "ctx",
+    closingMessage: "bye",
+  },
+  interviewerProfile: {
+    id: "p1",
+    name: "P",
+    persona: "persona",
+    tone: "tone",
+    questioningBehavior: "behavior",
+    followUpBehavior: { requiredCount: 1, specificQuestions: [], sharedQuestions: [] },
+    voice: { slot: "random" as const },
+  },
+  evaluationFramework: {
+    id: "f1",
+    name: "F",
+    maxScore: 100,
+    criteria: [{ id: "a", name: "A", weight: 100, description: "d" }],
+    observableRules: [],
+    mustReward: [],
+    mustPenalize: [],
+    evaluationInstructions: "instructions",
+  },
+  contentSources: [],
+} as import("../engine-config/schema.js").ResolvedScenarioConfig;
+
 const baseParams = {
   sessionId: "s1",
-  target: "generic" as const,
+  resolved: minimalResolved,
   transcript: [{ role: "user" as const, text: "hola" }],
   durationSeconds: 30,
   metrics: {

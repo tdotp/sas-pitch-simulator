@@ -1,12 +1,17 @@
 // Shared domain types for the SAS pitch simulator backend.
 
-export type TargetMode = "generic" | "davivienda" | "grupo_aval";
-
-// Rubric target ids as used in rubricas_sas.json.
-export type RubricKey =
-  | "generic"
-  | "davivienda_javier_suarez"
-  | "grupo_aval_maria_lorena";
+// Phase 5 (ENGINE vs CONFIG): TargetMode used to be a closed union
+// ("generic" | "davivienda" | "grupo_aval") that every layer branched on
+// — exactly the client-specific hardcoding this phase eliminates. The
+// new domain concept is `scenarioId` (a plain string, resolved within an
+// organization's config package — see engine-config/schema.ts). This
+// alias exists ONLY for the request/response wire field named
+// `target_mode`, kept unchanged so the current frontend needs zero
+// changes (see FRONTEND_COMPATIBILITY in
+// PHASE_05_ENGINE_CONFIG_REPORT.md). Nothing in backend/src/engine/* or
+// engine-config/* uses this type — they only ever see scenarioId
+// strings.
+export type TargetMode = string;
 
 export type VoiceGender = "male" | "female" | "random";
 
@@ -14,9 +19,14 @@ export type VoiceGender = "male" | "female" | "random";
 // used to be client-supplied fields here; they're derived exclusively from
 // the verified Firebase ID token (see requireAuth + req.auth in routes.ts)
 // and must never come from the request body again.
+//
+// Phase 5: `target_mode` is the DEPRECATED wire-compat name for what the
+// engine calls `scenarioId` — see routes.ts's /session/start, which reads
+// this field but treats its value as a scenario id to resolve within the
+// caller's organization, never as a closed enum.
 export interface StartSessionRequest {
   target_mode: TargetMode;
-  voice_gender?: VoiceGender; // only meaningful for generic
+  voice_gender?: VoiceGender; // only meaningful when the profile's voice slot is "random"
 }
 
 // Phase 4 — explicit session lifecycle (see PHASE_04_SESSION_LIFECYCLE_REPORT.md
@@ -40,6 +50,13 @@ export interface SessionRecord {
   session_id: string;
   user_id: string;
   user_name: string;
+  // Phase 5: the canonical field going forward — a scenario id resolved
+  // within `organization_id`'s config package (see
+  // engine-config/resolver.ts). `target_mode` below is kept as a
+  // deprecated MIRROR of this same value, written only so existing
+  // reads of the API response (frontend) and any tooling querying
+  // Firestore by the old field name keep working during the transition.
+  scenario_id: string;
   target_mode: TargetMode;
   voice_gender: VoiceGender;
   voice_id: string;

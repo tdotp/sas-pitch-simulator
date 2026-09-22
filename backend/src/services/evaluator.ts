@@ -10,16 +10,12 @@
 // PHASE_04_SESSION_LIFECYCLE_REPORT.md.
 
 import { config } from "../config.js";
-import type {
-  EvaluationResult,
-  SpeechMetrics,
-  TargetMode,
-  TranscriptTurn,
-} from "../types.js";
+import type { EvaluationResult, SpeechMetrics, TranscriptTurn } from "../types.js";
+import type { ResolvedScenarioConfig } from "../engine-config/schema.js";
 import {
-  EVALUATOR_SYSTEM_PROMPT,
+  buildEvaluatorSystemPrompt,
   buildEvaluatorUserMessage,
-} from "../data/evaluatorPrompt.js";
+} from "../engine/evaluatorPromptBuilder.js";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -90,8 +86,9 @@ function extractJson(raw: string): string {
 // timeout, non-2xx, empty content, bad JSON) — the caller decides what's
 // retryable.
 async function attemptEvaluation(
+  systemPrompt: string,
   userMessage: string,
-  target: TargetMode,
+  scenarioId: string,
   sessionId: string
 ): Promise<EvaluationResult> {
   const controller = new AbortController();
@@ -113,7 +110,7 @@ async function attemptEvaluation(
         max_tokens: 4000,
         response_format: { type: "json_object" },
         messages: [
-          { role: "system", content: EVALUATOR_SYSTEM_PROMPT },
+          { role: "system", content: systemPrompt },
           { role: "user", content: userMessage },
         ],
       }),
@@ -167,7 +164,7 @@ async function attemptEvaluation(
   }
 
   parsed.session_id = sessionId;
-  parsed.target_mode = target;
+  parsed.target_mode = scenarioId; // deprecated wire-compat mirror, see types.ts
   return parsed;
 }
 
@@ -187,16 +184,22 @@ export class EvaluationError extends Error {
   }
 }
 
+// Phase 5: no `target: TargetMode` — the evaluator consumes an already-
+// RESOLVED scenario config (interviewer/evaluationFramework/content all
+// looked up and cross-referenced by the caller). This function never
+// imports a fixed rubric and never branches on which client/scenario
+// it's evaluating.
 export async function evaluatePitch(params: {
   sessionId: string;
-  target: TargetMode;
+  resolved: ResolvedScenarioConfig;
   transcript: TranscriptTurn[];
   durationSeconds: number;
   metrics: SpeechMetrics;
 }): Promise<EvaluationResult> {
+  const systemPrompt = buildEvaluatorSystemPrompt(params.resolved);
   const userMessage = buildEvaluatorUserMessage({
     sessionId: params.sessionId,
-    target: params.target,
+    resolved: params.resolved,
     transcript: params.transcript,
     durationSeconds: params.durationSeconds,
     metrics: params.metrics,
@@ -205,7 +208,7 @@ export async function evaluatePitch(params: {
   let lastError: EvaluationError | null = null;
   for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {
     try {
-      return await attemptEvaluation(userMessage, params.target, params.sessionId);
+      return await attemptEvaluation(systemPrompt, userMessage, params.resolved.scenario.id, params.sessionId);
     } catch (err) {
       const evalErr =
         err instanceof EvaluationError

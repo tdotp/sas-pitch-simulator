@@ -3,10 +3,16 @@
 // overrides (system prompt, first message, voice) that the frontend SDK applies
 // at startSession. This is the "fast lane": STT + turn-taking + TTS handled
 // natively by ElevenLabs for lowest latency.
+//
+// Phase 5: takes a ResolvedScenarioConfig, not a TargetMode. No branching
+// on client/scenario identity lives here — voice selection reads
+// InterviewerProfile.voice.slot (a generic "male"/"female"/"random" slot,
+// config), never a scenario id.
 
 import { config } from "../config.js";
-import type { TargetMode, VoiceGender } from "../types.js";
-import { buildInterviewerPrompt } from "../data/prompts.js";
+import type { VoiceGender } from "../types.js";
+import type { ResolvedScenarioConfig } from "../engine-config/schema.js";
+import { buildInterviewerPrompt } from "../engine/promptBuilder.js";
 
 const ELEVEN_BASE = "https://api.elevenlabs.io/v1";
 
@@ -35,52 +41,46 @@ export interface SignedUrlResult {
   overrides: AgentOverrides;
 }
 
-// Pick a concrete voice id for the scenario + requested gender.
-export function resolveVoice(
-  target: TargetMode,
-  requested?: VoiceGender
+// Resolves a symbolic voice slot (config: InterviewerProfile.voice.slot,
+// optionally overridden per-request by the caller for the "random" case)
+// to a concrete ElevenLabs voice id. The actual ids stay in env config
+// (config.elevenlabs.voices) — never in a content package — so a config
+// package can ship to Firestore later without carrying provider secrets.
+function resolveVoice(
+  slot: "male" | "female" | "random",
+  requestedOverride?: VoiceGender
 ): { voiceId: string; gender: VoiceGender } {
   const v = config.elevenlabs.voices;
+  const effective = requestedOverride ?? slot;
 
-  // Davivienda → male, Grupo Aval → female (per brief). Generic → requested.
-  if (target === "davivienda") return { voiceId: v.male, gender: "male" };
-  if (target === "grupo_aval") return { voiceId: v.female, gender: "female" };
-
-  // generic
-  const gender = requested ?? "random";
-  if (gender === "male") return { voiceId: v.male, gender: "male" };
-  if (gender === "female") return { voiceId: v.female, gender: "female" };
+  if (effective === "male") return { voiceId: v.male, gender: "male" };
+  if (effective === "female") return { voiceId: v.female, gender: "female" };
 
   // random: choose among the configured pool, fallback to male/female.
   const pool = [v.genericA, v.genericB, v.male, v.female].filter(Boolean);
-  const chosen = pool.length
-    ? pool[Math.floor(Math.random() * pool.length)]
-    : v.male;
-  const gender2: VoiceGender = chosen === v.female ? "female" : "male";
-  return { voiceId: chosen, gender: gender2 };
+  const chosen = pool.length ? pool[Math.floor(Math.random() * pool.length)] : v.male;
+  const gender: VoiceGender = chosen === v.female ? "female" : "male";
+  return { voiceId: chosen, gender };
 }
 
-export function buildOverrides(
-  target: TargetMode,
-  voiceId: string
-): AgentOverrides {
-  const { systemPrompt, firstMessage } = buildInterviewerPrompt(target);
+export function buildOverrides(resolved: ResolvedScenarioConfig, voiceId: string): AgentOverrides {
+  const { systemPrompt, firstMessage } = buildInterviewerPrompt(resolved);
   return {
     agent: {
       prompt: { prompt: systemPrompt },
       first_message: firstMessage,
-      language: "es",
+      language: resolved.client.defaultLanguage,
     },
     tts: { voice_id: voiceId },
   };
 }
 
 export async function getSignedUrl(
-  target: TargetMode,
+  resolved: ResolvedScenarioConfig,
   requestedVoice?: VoiceGender
 ): Promise<SignedUrlResult> {
   const agentId = config.elevenlabs.agentId;
-  const { voiceId, gender } = resolveVoice(target, requestedVoice);
+  const { voiceId, gender } = resolveVoice(resolved.interviewerProfile.voice.slot, requestedVoice);
 
   const url = `${ELEVEN_BASE}/convai/conversation/get-signed-url?agent_id=${encodeURIComponent(
     agentId
@@ -118,6 +118,6 @@ export async function getSignedUrl(
     agent_id: agentId,
     voice_id: voiceId,
     voice_gender: gender,
-    overrides: buildOverrides(target, voiceId),
+    overrides: buildOverrides(resolved, voiceId),
   };
 }

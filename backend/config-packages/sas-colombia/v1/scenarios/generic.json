@@ -1,0 +1,12 @@
+{
+  "id": "generic",
+  "name": "Conversación general",
+  "description": "Practica una presentación ejecutiva sin una compañía específica.",
+  "interviewerProfileId": "c-level-generic",
+  "evaluationFrameworkId": "generic-v1",
+  "contentSourceIds": ["playbook-sas"],
+  "timing": { "idealSeconds": 90, "maxSeconds": 180 },
+  "firstMessage": "Sandra, vamos a hacer un ejercicio de pitch ejecutivo. Tienes 90 segundos ideales y máximo 3 minutos para explicar por qué SAS es relevante para una organización de alto nivel. Debes incluir una cifra, mencionar a SAS y cerrar con un siguiente paso claro. Cuando estés lista, empieza.",
+  "openingContext": "OBJETIVO DEL EJERCICIO:\nSandra debe entregar un mensaje de 90 segundos idealmente y máximo 3 minutos que: capte atención rápido, incluya al menos una cifra relevante, mencione a SAS de forma natural, conecte IA/datos/analítica con un problema real de negocio, evite muletillas y repeticiones, y cierre con un call to action claro.",
+  "closingMessage": "Gracias, Sandra. Ya tengo suficiente para evaluar el pitch. Voy a preparar el feedback con duración, claridad, uso de cifras, mención de SAS, call to action y alineación al playbook."
+}

@@ -1,0 +1,33 @@
+{
+  "id": "generic-v1",
+  "name": "Rúbrica genérica C-level",
+  "maxScore": 100,
+  "criteria": [
+    { "id": "message_clarity", "name": "Claridad del mensaje", "weight": 20, "description": "El pitch es directo, comprensible, ejecutivo y evita vueltas innecesarias." },
+    { "id": "business_relevance", "name": "Relevancia de negocio", "weight": 15, "description": "Conecta SAS con un problema real de negocio, riesgo, eficiencia, cliente o toma de decisiones." },
+    { "id": "playbook_alignment", "name": "Alineación al playbook", "weight": 20, "description": "Está alineado con narrativa SAS: IA confiable, analítica avanzada, gobernanza, criterio humano, decisiones confiables e impacto por industria." },
+    { "id": "use_of_evidence", "name": "Uso de evidencia", "weight": 15, "description": "Incluye al menos una cifra o evidencia concreta y la conecta con una implicación de negocio." },
+    { "id": "sas_positioning", "name": "Posicionamiento SAS", "weight": 10, "description": "Menciona SAS de forma natural y diferenciada, sin sonar a venta genérica." },
+    { "id": "call_to_action", "name": "Call to action", "weight": 10, "description": "Cierra con un siguiente paso concreto, realista y accionable." },
+    { "id": "duration_control", "name": "Control de duración", "weight": 5, "description": "Idealmente dura 90 segundos o menos; máximo aceptable 180 segundos." },
+    { "id": "verbal_fluency", "name": "Fluidez verbal", "weight": 5, "description": "Evita muletillas excesivas, repeticiones, contradicciones o pérdida de foco." }
+  ],
+  "observableRules": [
+    "incluye al menos una cifra",
+    "menciona SAS",
+    "incluye un call to action",
+    "no supera 180 segundos",
+    "abre con dolor de negocio, no con herramienta",
+    "evita buzzwords vacíos",
+    "no promete resultados sin baseline",
+    "no usa información no verificable"
+  ],
+  "durationPolicy": {
+    "idealSeconds": 90,
+    "maxSeconds": 180,
+    "scoring": { "lte_90": 100, "lte_120": 80, "lte_150": 60, "lte_180": 40, "gt_180": 0 }
+  },
+  "mustReward": [],
+  "mustPenalize": [],
+  "evaluationInstructions": "Evalúa con la rúbrica genérica C-level. No supongas ninguna industria específica: valora claridad, relevancia de negocio, alineación al playbook SAS, evidencia, posicionamiento de SAS, CTA, duración y fluidez verbal exactamente como los describe cada criterio."
+}

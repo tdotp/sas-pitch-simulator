@@ -1,0 +1,6 @@
+{
+  "id": "acme-facts",
+  "type": "company_context",
+  "title": "Contexto de práctica — Acme Demo Co (ficticio)",
+  "body": "PAQUETE DE DEMOSTRACIÓN — Acme Demo Co es una organización ficticia usada únicamente para probar que el engine de entrenamiento funciona con contenido de un cliente distinto de SAS, sin ningún branching por cliente en el código. No representa ninguna empresa real.\nAcme Demo Co es una compañía de logística regional ficticia. Prioridades de ejemplo: visibilidad de inventario en tiempo real, reducción de costos de última milla, satisfacción del cliente."
+}

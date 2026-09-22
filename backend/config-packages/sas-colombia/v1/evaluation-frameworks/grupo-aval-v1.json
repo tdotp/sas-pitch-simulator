@@ -1,0 +1,56 @@
+{
+  "id": "grupo-aval-v1",
+  "name": "Rúbrica CEO Grupo Aval / María Lorena Gutiérrez",
+  "maxScore": 100,
+  "criteria": [
+    { "id": "holding_logic", "name": "Lógica de holding", "weight": 15, "description": "Entiende la lógica de holding, sinergias y mejores prácticas entre entidades." },
+    { "id": "payments_relevance", "name": "Relevancia de pagos", "weight": 15, "description": "Conecta con pagos interoperables, GOU Payments, Bre-B, QR, WhatsApp o ecosistema de pagos." },
+    { "id": "cyber_maturity", "name": "Madurez cibernética", "weight": 10, "description": "Habla de ciberseguridad, SOC, CSIRT, ciberfraude o riesgo de terceros con madurez técnica y ejecutiva." },
+    { "id": "open_finance_governance", "name": "Gobierno de open finance", "weight": 10, "description": "Aterriza open finance y gobierno del dato: consentimiento, seguridad, trazabilidad, protección al consumidor y regulación." },
+    { "id": "use_of_public_data", "name": "Uso de datos públicos", "weight": 10, "description": "Usa cifras públicas útiles sobre Grupo Aval, pagos, clientes, cartera, depósitos, Bre-B, sector financiero o inclusión." },
+    { "id": "profitability_efficiency", "name": "Rentabilidad y eficiencia", "weight": 15, "description": "Conecta la propuesta con rentabilidad, eficiencia, pérdida evitada, reducción de revisión manual, calidad de cartera o costo operativo." },
+    { "id": "cross_entity_scalability", "name": "Escalabilidad entre entidades", "weight": 10, "description": "Explica cómo la capacidad escala entre entidades sin prometer uniformidad total inmediata." },
+    { "id": "risk_acknowledgement", "name": "Reconocimiento de riesgo", "weight": 5, "description": "Hace visibles riesgos y mitigantes: regulación, consumidor, terceros, datos, sesgo, deriva o centralización excesiva." },
+    { "id": "return_questions", "name": "Preguntas de retorno", "weight": 5, "description": "Formula preguntas de retorno de nivel holding: sponsor, entidad ancla, dominio prioritario, KPI corporativo." },
+    { "id": "credibility", "name": "Credibilidad", "weight": 5, "description": "Mantiene prudencia, no sobrepromete y no atribuye preferencias privadas." }
+  ],
+  "observableRules": [
+    "menciona lógica de holding o sinergias",
+    "si habla de pagos, menciona interoperabilidad o tiempo real",
+    "si habla de IA, menciona gobierno, monitoreo o trazabilidad",
+    "si habla de open finance, menciona consentimiento y seguridad",
+    "no presenta un caso exclusivo para una sola entidad sin explicar réplica",
+    "incluye al menos una métrica de ROI, eficiencia o pérdida evitada",
+    "reconoce sensibilidad regulatoria y de consumidor",
+    "evita lenguaje anti-fintech o anti-ecosistema",
+    "si propone centralización, delimita qué se centraliza y qué no",
+    "usa una cifra pública actual del grupo o del sector",
+    "hace una pregunta sobre sponsor corporativo o entidad ancla",
+    "no promete uniformidad total inmediata entre bancos",
+    "no vende solo tecnología; vende operating model",
+    "traduce beneficio a holding y a entidad específica cuando aplique"
+  ],
+  "durationPolicy": {
+    "idealSeconds": 90,
+    "maxSeconds": 180,
+    "scoring": { "lte_90": 100, "lte_120": 80, "lte_150": 60, "lte_180": 40, "gt_180": 0 }
+  },
+  "mustReward": [
+    "capacidad reusable para el grupo",
+    "pagos interoperables con control",
+    "ciberfraude y riesgo de terceros",
+    "ROI defendible",
+    "gobierno de IA a nivel grupo",
+    "centralización matizada: estándares sí, ejecución no necesariamente"
+  ],
+  "mustPenalize": [
+    "caso local sin lógica de holding",
+    "IA como hype",
+    "centralización total sin matices",
+    "claims regulatorios ingenuos",
+    "lenguaje anti-ecosistema",
+    "no incluir cifra",
+    "no incluir CTA"
+  ],
+  "evaluationInstructions": "No atribuyas opiniones privadas a María Lorena Gutiérrez — evalúa contra la agenda PÚBLICA de Grupo Aval. Prioriza si el pitch piensa en holding (no solo en un banco), pagos interoperables, ciberseguridad/open finance, y rentabilidad/eficiencia defendible."
+}

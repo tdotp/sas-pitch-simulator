@@ -1,0 +1,9 @@
+{
+  "organizationId": "sas-colombia",
+  "version": "v1",
+  "status": "active",
+  "interviewerProfiles": ["c-level-generic", "c-level-davivienda", "c-level-grupo-aval"],
+  "scenarios": ["generic", "davivienda", "grupo_aval"],
+  "evaluationFrameworks": ["generic-v1", "davivienda-v1", "grupo-aval-v1"],
+  "contentSources": ["playbook-sas", "colombia-context", "profile-davivienda", "profile-grupo-aval"]
+}

@@ -1,0 +1,12 @@
+{
+  "id": "davivienda",
+  "name": "Davivienda",
+  "description": "Enfoque en transformación, riesgo, cliente e innovación.",
+  "interviewerProfileId": "c-level-davivienda",
+  "evaluationFrameworkId": "davivienda-v1",
+  "contentSourceIds": ["playbook-sas", "profile-davivienda"],
+  "timing": { "idealSeconds": 90, "maxSeconds": 180 },
+  "firstMessage": "Sandra, imagina que tienes frente a ti a un CEO de banca regional con una agenda fuerte de integración, pagos digitales, riesgo y rentabilidad. Tienes 90 segundos ideales y máximo 3 minutos. Necesito que me digas por qué SAS es relevante ahora para Davivienda, con una cifra, un caso de negocio y un siguiente paso concreto. Cuando estés lista, empieza.",
+  "openingContext": "OBJETIVO DEL EJERCICIO:\nSandra debe entregar un pitch ejecutivo (90 s ideal, máximo 3 min) que demuestre que entiende: banco + holding en integración; DaviPlata como neobanco rentable (no solo billetera); pagos inmediatos, Bre-B, ePayco y fraude transaccional; gobierno de modelos, trazabilidad, líneas de defensa y control regulatorio; y la diferencia entre prometer IA y operar decisiones medibles.",
+  "closingMessage": "Gracias, Sandra. Ya tengo suficiente para evaluar si el mensaje conecta con una agenda Davivienda: integración, DaviPlata, pagos, riesgo, gobierno y valor medible."
+}

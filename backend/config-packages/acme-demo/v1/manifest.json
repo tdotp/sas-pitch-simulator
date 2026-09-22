@@ -1,0 +1,9 @@
+{
+  "organizationId": "acme-demo",
+  "version": "v1",
+  "status": "active",
+  "interviewerProfiles": ["press-generic"],
+  "scenarios": ["generic"],
+  "evaluationFrameworks": ["press-generic-v1"],
+  "contentSources": ["acme-facts"]
+}

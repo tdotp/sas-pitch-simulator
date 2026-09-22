@@ -32,14 +32,83 @@ vi.mock("./config.js", () => ({
   assertOpenRouterReady: () => null,
 }));
 
+// Phase 5: getSignedUrl now takes a ResolvedScenarioConfig. The mock
+// reflects organizationId/scenario.id into the overrides it returns so
+// tests can assert two different resolved configs actually produce
+// different output through the exact same /session/start code path (see
+// describe("Phase 5: ENGINE vs CONFIG") below) — not just that the
+// function was called.
 vi.mock("./services/elevenlabs.js", () => ({
-  getSignedUrl: vi.fn(async () => ({
-    agent_id: "agent-1",
-    signed_url: "wss://example.test/signed",
-    voice_id: "voice-1",
-    voice_gender: "male" as const,
-    overrides: {},
-  })),
+  getSignedUrl: vi.fn(
+    async (resolved: { organizationId: string; scenario: { id: string } }) => ({
+      agent_id: "agent-1",
+      signed_url: "wss://example.test/signed",
+      voice_id: "voice-1",
+      voice_gender: "male" as const,
+      overrides: {
+        agent: {
+          prompt: { prompt: `PROMPT FOR ${resolved.organizationId}/${resolved.scenario.id}` },
+          first_message: "hi",
+          language: "es",
+        },
+        tts: { voice_id: "voice-1" },
+      },
+    })
+  ),
+}));
+
+// Phase 5: /session/start and /session/end resolve scenario config via
+// this module instead of branching on a hardcoded TargetMode. Mocked with
+// a generic default (any organizationId + a known scenario id resolves to
+// a fixture) so the ~30 existing tests using target_mode: "generic" keep
+// working unchanged; individual Phase 5 tests override this to exercise
+// scenario_not_found / no_config_for_organization / per-organization
+// distinct configs. The REAL loader/resolver (against the actual shipped
+// fixture packages backend/config-packages/sas-colombia,/acme-demo) is
+// tested separately and without mocks in engine-config/loader.test.ts and
+// engine-config/resolver.test.ts.
+const KNOWN_SCENARIO_IDS = ["generic", "davivienda", "grupo_aval"];
+function fixtureResolvedScenario(organizationId: string, scenarioId: string) {
+  return {
+    organizationId,
+    client: { organizationId, defaultLanguage: "es", settings: {} },
+    scenario: {
+      id: scenarioId,
+      name: scenarioId,
+      description: `description for ${scenarioId} @ ${organizationId}`,
+      interviewerProfileId: "p1",
+      evaluationFrameworkId: "f1",
+      contentSourceIds: [],
+      timing: { idealSeconds: 90, maxSeconds: 180 },
+      firstMessage: "hi",
+      openingContext: "ctx",
+      closingMessage: "bye",
+    },
+    interviewerProfile: {
+      id: "p1",
+      name: "P",
+      persona: "persona",
+      tone: "tone",
+      questioningBehavior: "behavior",
+      followUpBehavior: { requiredCount: 1, specificQuestions: [], sharedQuestions: [] },
+      voice: { slot: "random" },
+    },
+    evaluationFramework: {
+      id: "f1",
+      name: "F",
+      maxScore: 100,
+      criteria: [{ id: "a", name: "A", weight: 100, description: "d" }],
+      observableRules: [],
+      mustReward: [],
+      mustPenalize: [],
+      evaluationInstructions: "instructions",
+    },
+    contentSources: [],
+  };
+}
+const resolveScenarioConfigMock = vi.fn();
+vi.mock("./engine-config/resolver.js", () => ({
+  resolveScenarioConfig: (...args: unknown[]) => resolveScenarioConfigMock(...args),
 }));
 
 const evaluatePitchMock = vi.fn(async () => ({
@@ -227,6 +296,15 @@ beforeEach(() => {
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
   }));
+  resolveScenarioConfigMock.mockReset();
+  resolveScenarioConfigMock.mockImplementation(
+    async ({ organizationId, scenarioId }: { organizationId: string; scenarioId: string }) => {
+      if (KNOWN_SCENARIO_IDS.includes(scenarioId)) {
+        return { outcome: "resolved", config: fixtureResolvedScenario(organizationId, scenarioId) };
+      }
+      return { outcome: "scenario_not_found" };
+    }
+  );
 });
 
 function membership(overrides: Record<string, unknown> = {}) {
@@ -1016,5 +1094,108 @@ describe("GET /me — Phase 2 server-resolved organization/role context", () => 
       .set("Authorization", "Bearer good");
 
     expect(res.status).toBe(503);
+  });
+});
+
+describe("Phase 5: ENGINE vs CONFIG", () => {
+  it("POST /session/start resolves scenario config generically — persists scenario_id, no hardcoded TargetMode branch", async () => {
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const res = await request(buildApp())
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "davivienda" }); // wire-compat field, treated as scenarioId
+
+    expect(res.status).toBe(200);
+    expect(resolveScenarioConfigMock).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: "org-1", scenarioId: "davivienda" })
+    );
+    const stored = sessionsStore.get(res.body.session_id);
+    expect(stored?.scenario_id).toBe("davivienda");
+    // target_mode is a deprecated mirror of scenario_id, kept for the
+    // current frontend's wire contract — see types.ts.
+    expect(stored?.target_mode).toBe("davivienda");
+    expect(res.body.target_mode).toBe("davivienda");
+  });
+
+  it("POST /session/start with an unknown scenario_id -> 400 (rejected, never silently falls back)", async () => {
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const res = await request(buildApp())
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "no-such-scenario" });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("POST /session/start when the organization has no valid config package -> 503, no internal details leaked", async () => {
+    resolveScenarioConfigMock.mockResolvedValueOnce({
+      outcome: "no_config_for_organization",
+      errors: ["manifest.json: parse error at line 3", "/secret/internal/path/leaked"],
+    });
+    asSingleOrgUser("uid-1", "org-without-config", "SPOKESPERSON");
+    const res = await request(buildApp())
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+
+    expect(res.status).toBe(503);
+    expect(JSON.stringify(res.body)).not.toContain("/secret/internal/path");
+    expect(JSON.stringify(res.body)).not.toContain("parse error");
+  });
+
+  it("two organizations resolve the SAME scenario_id to their OWN distinct config, through the identical code path — no collision", async () => {
+    const app = buildApp();
+
+    asSingleOrgUser("uid-a", "org-alpha", "SPOKESPERSON");
+    const resA = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    expect(resA.status).toBe(200);
+    expect(resA.body.overrides.agent.prompt.prompt).toBe("PROMPT FOR org-alpha/generic");
+
+    asSingleOrgUser("uid-b", "org-beta", "SPOKESPERSON");
+    const resB = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t2")
+      .send({ target_mode: "generic" });
+    expect(resB.status).toBe(200);
+    expect(resB.body.overrides.agent.prompt.prompt).toBe("PROMPT FOR org-beta/generic");
+
+    // Same scenario_id ("generic") in both, but each session persisted
+    // under its own organization — no cross-contamination.
+    expect(sessionsStore.get(resA.body.session_id)?.organization_id).toBe("org-alpha");
+    expect(sessionsStore.get(resB.body.session_id)?.organization_id).toBe("org-beta");
+  });
+
+  it("/session/end re-resolves the evaluation framework from the PERSISTED scenario_id, never from anything in the request body", async () => {
+    const app = buildApp();
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const startRes = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "grupo_aval" });
+    const sessionId = startRes.body.session_id as string;
+
+    resolveScenarioConfigMock.mockClear();
+    const endRes = await request(app)
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({
+        session_id: sessionId,
+        duration_seconds: 10,
+        transcript: [{ role: "user", text: "hola" }],
+        // Attempting to smuggle a different scenario in — /session/end
+        // doesn't even read this field, but assert it has zero effect.
+        target_mode: "davivienda",
+      });
+
+    expect(endRes.status).toBe(200);
+    // Re-resolved using the session's OWN persisted scenario_id
+    // ("grupo_aval"), not the body's "davivienda".
+    expect(resolveScenarioConfigMock).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: "org-1", scenarioId: "grupo_aval" })
+    );
+    expect(endRes.body.target_mode).toBe("grupo_aval");
   });
 });

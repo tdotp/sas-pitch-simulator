@@ -14,11 +14,13 @@ import { assertElevenReady, assertOpenRouterReady, config } from "./config.js";
 import { requireAuth } from "./middleware/auth.js";
 import { requireMembership } from "./middleware/context.js";
 import { requireAnyRole } from "./middleware/roles.js";
-import type { SessionRecord, StartSessionRequest, TargetMode, TranscriptTurn } from "./types.js";
+import type { SessionRecord, StartSessionRequest, TranscriptTurn } from "./types.js";
 import { getSignedUrl } from "./services/elevenlabs.js";
 import { computeMetrics } from "./services/metrics.js";
 import { evaluatePitch, EvaluationError } from "./services/evaluator.js";
 import { isAuthReady } from "./firebase.js";
+import { resolveScenarioConfig } from "./engine-config/resolver.js";
+import type { ResolvedScenarioConfig } from "./engine-config/schema.js";
 import {
   createSession,
   claimSessionForEvaluation,
@@ -28,8 +30,6 @@ import {
   getSessionById,
   listSessionsByOrganization,
 } from "./repositories/sessions.js";
-
-const VALID_TARGETS: TargetMode[] = ["generic", "davivienda", "grupo_aval"];
 
 export const router = Router();
 
@@ -69,6 +69,14 @@ const limiter = rateLimit({
 router.use(requireToken, limiter);
 
 // ── FAST LANE ─────────────────────────────────────────────
+//
+// Phase 5 (ENGINE vs CONFIG): this handler no longer branches on which
+// scenario it's starting. `target_mode` is a DEPRECATED wire-compat
+// field name (see StartSessionRequest in types.ts) — its value is
+// treated purely as a scenarioId to resolve within the caller's own
+// organization via resolveScenarioConfig(). There is no
+// `if (scenarioId === "davivienda")` anywhere in this file, and nothing
+// here knows what "davivienda" or "sas-colombia" mean.
 router.post(
   "/session/start",
   requireAuth,
@@ -78,11 +86,9 @@ router.post(
     if (elevenErr) return res.status(503).json({ error: elevenErr });
 
     const body = req.body as Partial<StartSessionRequest>;
-    const target = body.target_mode;
-    if (!target || !VALID_TARGETS.includes(target)) {
-      return res
-        .status(400)
-        .json({ error: `target_mode inválido. Usa: ${VALID_TARGETS.join(", ")}` });
+    const scenarioId = body.target_mode;
+    if (!scenarioId) {
+      return res.status(400).json({ error: "target_mode (scenario) requerido" });
     }
 
     // Identity AND tenant come ONLY from the verified token + resolved
@@ -92,13 +98,32 @@ router.post(
     const auth = req.auth!;
     const context = req.appContext!;
 
+    const scenarioResult = await resolveScenarioConfig({
+      organizationId: context.organizationId,
+      scenarioId,
+    });
+    if (scenarioResult.outcome === "no_config_for_organization") {
+      // An operator/config problem (no package, or it fails validation)
+      // — never expose the raw validation errors to the client, they can
+      // reveal internal package structure.
+      console.error(
+        `[/session/start] sin config válida para organizationId="${context.organizationId}":`,
+        scenarioResult.errors.join("; ")
+      );
+      return res.status(503).json({ error: "Esta organización no tiene configuración disponible." });
+    }
+    if (scenarioResult.outcome === "scenario_not_found") {
+      return res.status(400).json({ error: `scenario "${scenarioId}" no existe para esta organización` });
+    }
+    const resolved = scenarioResult.config;
+
     // Split so each failure maps to the right status per the error
     // taxonomy (Phase 4): 502 for the external provider (ElevenLabs),
     // 503 for our own backing dependency (Firestore) — and neither leaks
     // the raw error message to the client.
     let signed;
     try {
-      signed = await getSignedUrl(target, body.voice_gender);
+      signed = await getSignedUrl(resolved, body.voice_gender);
     } catch (err) {
       console.error("[/session/start] getSignedUrl falló:", (err as Error).message);
       return res.status(502).json({ error: "No se pudo iniciar la sesión de voz. Intenta de nuevo." });
@@ -109,7 +134,8 @@ router.post(
       user_id: auth.uid,
       user_name: auth.email ?? auth.uid,
       organization_id: context.organizationId,
-      target_mode: target,
+      scenario_id: resolved.scenario.id,
+      target_mode: resolved.scenario.id, // deprecated wire-compat mirror
       voice_gender: signed.voice_gender,
       voice_id: signed.voice_id,
       status: "in_progress",
@@ -132,7 +158,7 @@ router.post(
 
     res.json({
       session_id: session.session_id,
-      target_mode: target,
+      target_mode: session.scenario_id, // deprecated wire-compat mirror, see types.ts
       agent_id: signed.agent_id,
       signed_url: signed.signed_url,
       voice_id: signed.voice_id,
@@ -234,14 +260,33 @@ router.post(
     }
 
     // claim.outcome === "claimed": we now exclusively hold "evaluating".
-    const target: TargetMode = claim.session.target_mode;
+    // Re-resolve the SAME scenario config used at /session/start, keyed
+    // only by what's persisted on the session (organization_id +
+    // scenario_id) — never anything from this request's body. This is
+    // what lets evaluatePitch stay config-driven without /session/end
+    // needing to re-derive or trust a scenario from the client.
+    const scenarioId = claim.session.scenario_id ?? claim.session.target_mode;
+    const scenarioResult = await resolveScenarioConfig({
+      organizationId: claim.session.organization_id!,
+      scenarioId,
+    });
+    if (scenarioResult.outcome !== "resolved") {
+      console.error(
+        `[/session/end] no se pudo re-resolver la config para session=${session_id} ` +
+          `org=${claim.session.organization_id} scenario=${scenarioId}: ${scenarioResult.outcome}`
+      );
+      await markEvaluationFailed(session_id, "CONFIG_RESOLUTION_FAILED").catch(() => {});
+      return res.status(503).json({ error: "No se pudo evaluar la sesión. Intenta de nuevo más tarde." });
+    }
+    const resolved: ResolvedScenarioConfig = scenarioResult.config;
+    const target = resolved.scenario.id;
     const metrics = computeMetrics(transcript, duration);
 
     let evaluation;
     try {
       evaluation = await evaluatePitch({
         sessionId: session_id,
-        target,
+        resolved,
         transcript,
         durationSeconds: duration,
         metrics,

@@ -1,0 +1,12 @@
+{
+  "id": "grupo_aval",
+  "name": "Grupo Aval",
+  "description": "Enfoque en escala, eficiencia, rentabilidad e integración.",
+  "interviewerProfileId": "c-level-grupo-aval",
+  "evaluationFrameworkId": "grupo-aval-v1",
+  "contentSourceIds": ["playbook-sas", "profile-grupo-aval"],
+  "timing": { "idealSeconds": 90, "maxSeconds": 180 },
+  "firstMessage": "Sandra, imagina que estás frente a una presidenta de holding financiero. No quiero una demo táctica para un solo banco; quiero entender qué capacidad podría construir SAS para generar valor entre entidades, con control, eficiencia y trazabilidad. Tienes 90 segundos ideales y máximo 3 minutos. Incluye una cifra, menciona SAS y cierra con un siguiente paso claro. Cuando estés lista, empieza.",
+  "openingContext": "OBJETIVO DEL EJERCICIO:\nSandra debe entregar un pitch ejecutivo (90 s ideal, máximo 3 min) que demuestre que entiende: la lógica de holding y sinergias; la diferencia entre un caso local y una capacidad reusable para el grupo; pagos interoperables (GOU Payments, Bre-B, QR); ciberseguridad, riesgo de terceros y protección al consumidor; presión por rentabilidad, eficiencia y calidad de cartera; y el valor de SAS como capa de analítica, gobierno y decisiones auditables.",
+  "closingMessage": "Gracias, Sandra. Ya tengo suficiente para evaluar si el mensaje conecta con una agenda Grupo Aval: holding, pagos interoperables, ciberseguridad, open finance, eficiencia y valor medible."
+}
