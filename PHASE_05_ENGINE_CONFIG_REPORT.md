@@ -440,3 +440,78 @@ Además, el loader real se ejecutó manualmente contra ambos paquetes reales (`s
 
 **Commit de código de esta fase:** `25700d85f4c4a615672ad5407c87831ef5519ae5`
 **Este reporte:** commiteado por separado, después del código.
+
+---
+
+## PHASE_05_FIXES_ADDENDUM
+
+**Veredicto de revisión:** `PASS_WITH_FIXES`. Arquitectura ENGINE vs CONFIG aprobada; se pidió cerrar residuos client-specific dentro de contratos supuestamente genéricos. **No se rehizo `loader.ts`/`resolver.ts` ni el núcleo de `schema.ts`. No se avanzó a Fase 6.**
+**Commit del fix (código):** `194f638f612d03daa7b2d61961d08b1719750df3`
+
+### 1. `SpeechMetrics` sin conocimiento de SAS
+
+`services/metrics.ts` eliminó `SAS_RE` y el campo `mentioned_sas` por completo — ya no existe ni la constante ni la key en el objeto devuelto. `SpeechMetrics` (`types.ts`) ya no declara `mentioned_sas`. Las métricas deterministas genéricas que el prompt explícitamente permitió mantener siguen intactas: `word_count`, `words_per_minute`, fillers, repetitions, `numbers_detected`/`used_numbers`, `has_cta`, `long_pauses_count`. Probado en `services/metrics.test.ts` (nuevo): el objeto nunca tiene la key `mentioned_sas`, y el set de keys devuelto es idéntico con o sin la palabra "SAS" en el transcript.
+
+### 2-3. `detected_requirements` genérico + requirements config-driven
+
+**Antes:** `EvaluationResult.detected_requirements` era un objeto fijo con keys client-specific (`mentioned_sas`, `aligned_to_playbook`) mezcladas con métricas deterministas (`used_numbers`, `numbers_detected`, `has_cta`). El `OUTPUT_SCHEMA` universal de `evaluatorPromptBuilder.ts` declaraba esas mismas keys fijas, y `frameworkInputs.metrics` enviaba explícitamente `mentioned_sas: metrics.mentioned_sas`.
+
+**Ahora:**
+- `EvaluationResult.detected_requirements` (`types.ts`) es `Array<{ id: string; detected: boolean; evidence: string }>` — un elemento por cada requirement que el `EvaluationFramework` resuelto declare. Ningún campo con nombre de cliente en el contrato universal.
+- `used_numbers`/`numbers_detected`/`has_cta` (deterministas, calculados por `metrics.ts`, nunca juzgados por el LLM) se movieron a `EvaluationResult.speech_metrics`, junto al resto de métricas deterministas — separación limpia entre "lo que el engine mide" y "lo que el framework pide verificar".
+- `EvaluationFrameworkSchema` (`engine-config/schema.ts`) gana un campo **aditivo y opcional**: `requirements: Array<{id, description}>` (default `[]`, con su propio chequeo de ids duplicados en el `superRefine` existente). No es un rediseño del schema — frameworks que no lo necesitan (`davivienda-v1`, `grupo-aval-v1`) no se tocaron.
+- `sas-colombia/v1/evaluation-frameworks/generic-v1.json` ahora declara `requirements: [{id: "mentioned_sas", ...}, {id: "aligned_to_playbook", ...}]` — la migración concreta de esos dos campos de TypeScript a config.
+- `acme-demo/v1/evaluation-frameworks/press-generic-v1.json` declara su propio requirement, distinto (`verifiable_data`) — prueba viva de que agregar un requirement de un cliente nuevo es editar JSON, nunca tocar `EvaluationResult` ni el engine.
+- El `OUTPUT_SCHEMA` universal (`evaluatorPromptBuilder.ts`) ahora describe el shape genérico `[{id, detected, evidence}]` y es **byte-idéntico** entre frameworks (verificado por test); la instrucción de cómo llenarlo (un elemento por requirement declarado, mismo id) se agregó como regla general del prompt, no como dato específico de un cliente.
+
+Probado en `engine/evaluatorPromptBuilder.test.ts` (5 tests nuevos): dos frameworks con requirements distintos producen contenido de prompt distinto sin ninguna rama de código; el bloque `OUTPUT_SCHEMA` es idéntico entre frameworks; el paquete **real** de `acme-demo` (cargado vía `FileConfigPackageLoader` + `resolveScenarioConfig`, sin mocks) no produce `"mentioned_sas"` ni el texto `"SAS"` en ningún prompt construido, y sí produce `"verifiable_data"` (su propio requirement). También en `engine-config/schema.test.ts` (3 tests nuevos): `requirements` por defecto vacío, acepta una lista arbitraria, rechaza ids duplicados.
+
+**Nota sobre contenido, no código:** `acme-demo/v1/content/acme-facts.json` mencionaba literalmente la palabra "SAS" en su propio texto descriptivo ("...contenido de un cliente distinto de SAS..."). No es un defecto del engine — es contenido de config, inyectado verbatim — pero un paquete de demostración pensado para probar independencia de cliente no debería necesitar nombrar a otro cliente en su propio texto. Se reescribió para no mencionar "SAS", dejando la prueba de independencia limpia end-to-end.
+
+### 4. Sin nombres de persona hardcodeados
+
+`evaluatorPromptBuilder.ts`'s `transcriptToText()` y `repositories/sessions.ts`'s `persistCompletedResult()` serializaban el transcript con `"SANDRA"` hardcodeado para `role: "user"`. Ambos ahora usan las mismas etiquetas neutrales: **`VOCERO`** (spokesperson) / **`ENTREVISTADOR`** (antes `sessions.ts` usaba además `"AGENTE"`, distinto de `evaluatorPromptBuilder.ts`; se unificó a `ENTREVISTADOR` en los dos paths para que la misma sesión no tenga dos etiquetas distintas para el mismo rol según qué código la serialice). También se limpiaron dos comentarios residuales que mencionaban "Sandra" (`engine-config/schema.ts`, `services/metrics.ts`) — texto, no comportamiento.
+
+Probado en `engine/evaluatorPromptBuilder.test.ts` y `repositories/sessions.test.ts`: el string `"SANDRA"` nunca aparece en el prompt del evaluador ni en el transcript persistido; ambos paths usan `VOCERO`/`ENTREVISTADOR` sin importar el contenido del transcript.
+
+### 5. Tests que demuestran los 5 puntos pedidos
+
+| Punto pedido | Dónde |
+|---|---|
+| `SpeechMetrics` sin conocimiento de SAS | `services/metrics.test.ts` (nuevo, 4 tests) |
+| Config Acme no produce `"mentioned_sas"` ni texto `"SAS"` | `engine/evaluatorPromptBuilder.test.ts` — test contra el paquete REAL de `acme-demo` |
+| Dos frameworks definen requirements distintos sin tocar código | `engine/evaluatorPromptBuilder.test.ts` — test de contenido de prompt distinto |
+| El output contract universal sigue siendo el mismo | `engine/evaluatorPromptBuilder.test.ts` — test de `OUTPUT_SCHEMA` byte-idéntico entre frameworks |
+| Transcript serialization no depende de un nombre humano fijo | `engine/evaluatorPromptBuilder.test.ts` + `repositories/sessions.test.ts` — ambos contra `"SANDRA"` |
+
+### 6. Alcance real del contrato "no-code"
+
+Corrección explícita pedida por la revisión:
+
+> **Backend content-push contract: achieved.** Un paquete de cliente nuevo (config JSON válido bajo `config-packages/<org>/`) se resuelve, valida y sirve sin tocar `engine/*`, `engine-config/*` ni `routes.ts` — ver `CONTENT_PUSH_CONTRACT` arriba, ahora también cierto para `requirements`.
+>
+> **End-to-end no-code onboarding: pending dynamic frontend scenario discovery (later phase).** `frontend/src/config.ts` sigue manteniendo los 3 escenarios estáticos de SAS (`TARGETS`) — un cliente nuevo hoy no aparece en la UI de selección sin un cambio de código en el frontend. Esto ya estaba documentado en `KNOWN_LIMITATIONS`/`FRONTEND_COMPATIBILITY` de la versión original de este reporte, pero no estaba dicho con esta precisión; queda explícito aquí para que "backend generico" no se lea como "onboarding completo". No se tocó el frontend en esta ronda de fixes (instrucción explícita de la revisión).
+
+**KNOWN_LIMITATION nueva, descubierta en esta ronda (no corregida — instrucción explícita de no tocar frontend):** `frontend/src/components/Analysis.tsx` lee `evaluation.detected_requirements.{used_numbers, mentioned_sas, has_cta, aligned_to_playbook}` como si `detected_requirements` fuera todavía el objeto fijo de antes. Con el nuevo contrato (`detected_requirements` como array), esas 4 lecturas devuelven `undefined` en runtime — los 4 checkmarks de la sección "Requisitos mínimos" del panel de análisis van a mostrar siempre "✗ no detectado", incluso cuando el backend sí detectó el requirement correspondiente en `detected_requirements[]`. No es un error de compilación (`frontend/src/types.ts` es un contrato estático independiente, no validado contra la respuesta real del backend) y `npm run build` del frontend pasa sin errores. `frontend/src/components/Report.tsx` NO se ve afectado — sus lecturas (`metrics.numbers_detected`, `metrics.has_cta`) vienen de `SpeechMetrics`, que no cambió de forma. Corregir `Analysis.tsx` para leer el nuevo array (y, más de fondo, para renderizar dinámicamente los requirements que el framework resuelto declare en vez de 4 líneas fijas) es trabajo natural de la fase de onboarding no-code de frontend (11/12), consistente con la nota de alcance de arriba — no se adelantó aquí.
+
+### 7. Versionado: confirmado temporal
+
+Se agregó un comentario explícito (`TEMPORARY_VERSION_SELECTION`) en `engine-config/loader.ts` junto a `pickVersionDir()`, marcando que `entries.sort().reverse()` es un placeholder sin semver real, sin pinning de versión por sesión y sin manejo de `manifest.status` más allá de la elección lexicográfica — y que **no debe sobrevivir** al diseño real de versionado de Fase 6. Cero cambio de comportamiento; el comentario ya existente (`"Phase 5 keeps this deliberately trivial... real version selection is Phase 6"`) se mantuvo y se amplió, no se reemplazó.
+
+### Resultados
+
+```
+$ npm test
+backend:  Test Files  16 passed (16) | Tests  185 passed (185)
+frontend: Test Files   1 passed (1)  | Tests    4 passed (4)
+```
+
+(185 backend = 173 de la versión original de Fase 5 + 12 nuevas: 4 en `services/metrics.test.ts` + 5 en `engine/evaluatorPromptBuilder.test.ts` + 3 en `engine-config/schema.test.ts` + 1 en `repositories/sessions.test.ts` — la resta a 173+12=185 cuadra porque además se agregó 1 archivo de test nuevo, `metrics.test.ts`, contado en "Test Files".)
+
+```
+$ npm run build
+backend:  tsc -p tsconfig.json  -> sin errores
+frontend: tsc -b && vite build  -> sin errores (cero archivos de frontend modificados)
+```
+
+**No se desplegó. No se avanzó a Fase 6.**
