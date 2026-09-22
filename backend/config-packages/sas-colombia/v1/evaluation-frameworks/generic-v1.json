@@ -22,6 +22,10 @@
     "no promete resultados sin baseline",
     "no usa información no verificable"
   ],
+  "requirements": [
+    { "id": "mentioned_sas", "description": "Menciona SAS de forma natural y diferenciada, sin sonar a venta genérica." },
+    { "id": "aligned_to_playbook", "description": "El pitch está alineado con la narrativa SAS: IA confiable, analítica avanzada, gobernanza, criterio humano, decisiones confiables e impacto por industria." }
+  ],
   "durationPolicy": {
     "idealSeconds": 90,
     "maxSeconds": 180,

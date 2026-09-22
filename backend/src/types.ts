@@ -178,7 +178,6 @@ export interface SpeechMetrics {
   repetition_count: number;
   repetition_items: string[];
   long_pauses_count: number;
-  mentioned_sas: boolean;
   used_numbers: boolean;
   numbers_detected: string[];
   has_cta: boolean;
@@ -208,13 +207,18 @@ export interface EvaluationResult {
     status: "ideal" | "aceptable" | "largo" | "fuera_de_rango";
     comment: string;
   };
-  detected_requirements: {
-    mentioned_sas: boolean;
-    used_numbers: boolean;
-    numbers_detected: string[];
-    has_cta: boolean;
-    aligned_to_playbook: boolean;
-  };
+  // Phase 5 fix (PASS_WITH_FIXES): used to be a fixed object with
+  // client-specific keys (mentioned_sas, aligned_to_playbook) baked into
+  // this universal contract. Now a generic list, one entry per
+  // requirement DECLARED BY THE FRAMEWORK (EvaluationFramework.requirements
+  // in engine-config/schema.ts) — adding, removing or renaming a
+  // requirement for any client is a config change, never a change to this
+  // type or to engine code. `id` mirrors the framework's requirement id.
+  detected_requirements: Array<{
+    id: string;
+    detected: boolean;
+    evidence: string;
+  }>;
   speech_metrics: {
     word_count: number;
     words_per_minute: number;
@@ -223,6 +227,12 @@ export interface EvaluationResult {
     repetition_count: number;
     top_repetitions: string[];
     long_pauses_count: number;
+    // Deterministic, generic signals (computed by services/metrics.ts,
+    // never LLM-judged) — moved here from the old detected_requirements
+    // object since they're metrics, not framework-defined requirements.
+    used_numbers: boolean;
+    numbers_detected: string[];
+    has_cta: boolean;
     comment: string;
   };
   criteria_scores: Array<{

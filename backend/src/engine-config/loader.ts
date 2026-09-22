@@ -66,6 +66,15 @@ async function readJsonDir(dir: string): Promise<Array<{ file: string; data: unk
 // Picks the package version to load for an organization. Phase 5 keeps
 // this deliberately trivial (the only "active" version directory found) —
 // real version selection (pinning, provenance per session) is Phase 6.
+//
+// TEMPORARY_VERSION_SELECTION (PASS_WITH_FIXES item 7, tracked in
+// PHASE_05_ENGINE_CONFIG_REPORT.md): `entries.sort().reverse()` below is a
+// placeholder, not real semver/version resolution — it happens to put
+// "v2" before "v1" lexicographically, but has no notion of a session
+// pinning to the version it started with, no deprecation handling beyond
+// Manifest.status, and breaks on non-lexicographic version names (e.g.
+// "v9" vs "v10"). This must NOT survive Phase 6's real versioning design;
+// do not build anything else on top of this sort order.
 async function pickVersionDir(orgDir: string): Promise<string | null> {
   let entries: string[];
   try {

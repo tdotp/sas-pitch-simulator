@@ -1,6 +1,10 @@
 // Deterministic speech-metrics engine (Spanish/Colombia). Runs before the LLM
 // evaluator so scores can rely on hard signals: WPM, fillers, repetitions,
-// numbers, SAS mention, CTA. Only Sandra's turns are analyzed.
+// numbers, CTA. Only the spokesperson's (role: "user") turns are analyzed.
+// Phase 5 fixes: this module must never know about a specific client or
+// brand (no SAS-mention detection here — that's a framework-defined,
+// LLM-judged requirement now; see EvaluationFramework.requirements in
+// engine-config/schema.ts).
 
 import type { SpeechMetrics, TranscriptTurn } from "../types.js";
 
@@ -28,9 +32,6 @@ const STOPWORDS = new Set([
   "donde","cual","cada","entre","sin","sobre","desde","hasta","ese","esa","eso",
   "yo","él","ella","ellos","nosotros","usted","ustedes","the","of","and",
 ]);
-
-// SAS mention: word-boundary "SAS" but not "sas" inside other words.
-const SAS_RE = /\bSAS\b/g;
 
 // A CTA is a forward-looking proposal / next step. Heuristic lexicon.
 const CTA_PATTERNS: RegExp[] = [
@@ -141,7 +142,6 @@ export function computeMetrics(
     repetition_count: reps.count,
     repetition_items: reps.items,
     long_pauses_count: 0, // populated from client-side pause telemetry if available
-    mentioned_sas: SAS_RE.test(userText),
     used_numbers: numbers.length > 0,
     numbers_detected: numbers,
     has_cta: hasCTA(userText),

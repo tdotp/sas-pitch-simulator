@@ -8,6 +8,9 @@
     { "id": "composure", "name": "Serenidad", "weight": 30, "description": "Mantiene compostura ante preguntas directas." }
   ],
   "observableRules": ["incluye al menos un dato verificable", "no evade la repregunta"],
+  "requirements": [
+    { "id": "verifiable_data", "description": "Incluye al menos un dato verificable durante la entrevista." }
+  ],
   "mustReward": [],
   "mustPenalize": [],
   "evaluationInstructions": "Framework de demostración — evalúa solo lo descrito en los criterios, sin ningún contexto adicional específico de industria."

@@ -53,7 +53,6 @@ const metrics = {
   repetition_count: 0,
   repetition_items: [],
   long_pauses_count: 0,
-  mentioned_sas: true,
   used_numbers: true,
   numbers_detected: [],
   has_cta: true,
@@ -257,6 +256,27 @@ describe("persistCompletedResult", () => {
     expect(after?.evaluation).toEqual(evaluation);
     expect(after?.transcript?.full).toContain("hola");
     expect(after?.ended_at).toBeTruthy();
+  });
+
+  it("serializes the transcript with neutral role labels, never a fixed human name (SANDRA)", async () => {
+    const s = newSession();
+    await createSession(s);
+    await claimSessionForEvaluation({ sessionId: s.session_id, ownerUid: "uid-1", organizationId: "org-1" });
+
+    await persistCompletedResult(s.session_id, {
+      duration_seconds: 90,
+      transcript: [
+        { role: "agent", text: "pregunta" },
+        { role: "user", text: "respuesta" },
+      ],
+      metrics,
+      evaluation,
+    });
+
+    const after = await getSessionById(s.session_id);
+    expect(after?.transcript?.full).not.toContain("SANDRA");
+    expect(after?.transcript?.full).toContain("VOCERO: respuesta");
+    expect(after?.transcript?.full).toContain("ENTREVISTADOR: pregunta");
   });
 });
 

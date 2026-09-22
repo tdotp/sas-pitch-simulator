@@ -79,6 +79,55 @@ describe("EvaluationFrameworkSchema", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  // PASS_WITH_FIXES: `requirements` is the additive, generic mechanism
+  // replacing the old hardcoded mentioned_sas/aligned_to_playbook fields —
+  // config-driven, optional, never touching the engine.
+  it("defaults requirements to an empty array when omitted", () => {
+    const result = EvaluationFrameworkSchema.safeParse({
+      id: "no-reqs",
+      name: "No reqs",
+      maxScore: 100,
+      criteria: validCriteria(),
+      evaluationInstructions: "instructions",
+    });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.requirements).toEqual([]);
+  });
+
+  it("accepts an arbitrary, client-defined list of requirements", () => {
+    const result = EvaluationFrameworkSchema.safeParse({
+      id: "with-reqs",
+      name: "With reqs",
+      maxScore: 100,
+      criteria: validCriteria(),
+      requirements: [
+        { id: "mentioned_sas", description: "Menciona SAS." },
+        { id: "aligned_to_playbook", description: "Alineado con el playbook." },
+      ],
+      evaluationInstructions: "instructions",
+    });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.requirements).toHaveLength(2);
+  });
+
+  it("rejects duplicate requirement ids", () => {
+    const result = EvaluationFrameworkSchema.safeParse({
+      id: "dup-reqs",
+      name: "Dup reqs",
+      maxScore: 100,
+      criteria: validCriteria(),
+      requirements: [
+        { id: "x", description: "one" },
+        { id: "x", description: "two" },
+      ],
+      evaluationInstructions: "instructions",
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((i) => i.message.includes("requirement ids duplicados"))).toBe(true);
+    }
+  });
 });
 
 describe("InterviewerProfileSchema", () => {

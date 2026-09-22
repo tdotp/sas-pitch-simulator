@@ -320,8 +320,11 @@ export async function persistCompletedResult(
     evaluation: EvaluationResult;
   }
 ): Promise<EvaluatingExitResult> {
+  // Phase 5 fix (PASS_WITH_FIXES): no hardcoded person name — VOCERO
+  // (spokesperson) / ENTREVISTADOR are neutral role labels, same pair used
+  // by engine/evaluatorPromptBuilder.ts's transcriptToText().
   const full = params.transcript
-    .map((t) => `${t.role === "user" ? "SANDRA" : "AGENTE"}: ${t.text}`)
+    .map((t) => `${t.role === "user" ? "VOCERO" : "ENTREVISTADOR"}: ${t.text}`)
     .join("\n");
   const userOnly = params.transcript
     .filter((t) => t.role === "user")

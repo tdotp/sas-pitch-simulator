@@ -47,6 +47,7 @@ function resolvedFor(organizationId: string, voiceSlot: "male" | "female" | "ran
       maxScore: 100,
       criteria: [{ id: "a", name: "A", weight: 100, description: "d" }],
       observableRules: [],
+      requirements: [],
       mustReward: [],
       mustPenalize: [],
       evaluationInstructions: "instructions",

@@ -21,6 +21,7 @@ REGLAS GENERALES:
 - No inventes cifras ni atribuyas intenciones privadas a personas reales.
 - Si falta evidencia, dilo explícitamente.
 - Distingue hechos observables, inferencias razonables y recomendaciones.
+- El framework puede declarar una lista de "requirements" (framework.requirements en el JSON de entrada), cada uno con id y description. Devuelve exactamente un elemento en detected_requirements por cada requirement declarado (mismo id), con detected=true/false y evidence citando el transcript. Si el framework no declara requirements, detected_requirements es un array vacío.
 
 SALIDA: responde EXCLUSIVAMENTE con un JSON válido que cumpla el esquema indicado en el mensaje de usuario. No incluyas markdown, ni texto fuera del JSON, ni bloques de código. La suma de puntos del framework equivale a max_score; no cambies los pesos. Para cada criterio entrega score, max_score, evidencia del transcript, comentario y recomendación.
 
@@ -44,13 +45,9 @@ const OUTPUT_SCHEMA = `{
     "status": "ideal | aceptable | largo | fuera_de_rango",
     "comment": "string"
   },
-  "detected_requirements": {
-    "mentioned_sas": true,
-    "used_numbers": true,
-    "numbers_detected": [],
-    "has_cta": true,
-    "aligned_to_playbook": true
-  },
+  "detected_requirements": [
+    { "id": "string (uno de framework.requirements[].id, uno por cada requirement declarado)", "detected": true, "evidence": "string (cita textual del transcript, o vacío si no se detectó)" }
+  ],
   "speech_metrics": {
     "word_count": 0,
     "words_per_minute": 0,
@@ -59,6 +56,9 @@ const OUTPUT_SCHEMA = `{
     "repetition_count": 0,
     "top_repetitions": [],
     "long_pauses_count": 0,
+    "used_numbers": true,
+    "numbers_detected": [],
+    "has_cta": true,
     "comment": "string"
   },
   "criteria_scores": [
@@ -77,9 +77,12 @@ const OUTPUT_SCHEMA = `{
   "coach_feedback": "string"
 }`;
 
+// Phase 5 fix (PASS_WITH_FIXES): neutral role labels, not a hardcoded
+// person name — this function must serialize the same way regardless of
+// which client/organization's session it's building a prompt for.
 function transcriptToText(transcript: TranscriptTurn[]): { full: string; userOnly: string } {
   const full = transcript
-    .map((t) => `${t.role === "user" ? "SANDRA" : "ENTREVISTADOR"}: ${t.text}`)
+    .map((t) => `${t.role === "user" ? "VOCERO" : "ENTREVISTADOR"}: ${t.text}`)
     .join("\n");
   const userOnly = transcript
     .filter((t) => t.role === "user")
@@ -114,6 +117,7 @@ export function buildEvaluatorUserMessage(params: {
       name: evaluationFramework.name,
       max_score: evaluationFramework.maxScore,
       criteria: evaluationFramework.criteria,
+      requirements: evaluationFramework.requirements,
       observable_rules: evaluationFramework.observableRules,
       duration_policy: evaluationFramework.durationPolicy,
       must_reward: evaluationFramework.mustReward,
@@ -125,7 +129,6 @@ export function buildEvaluatorUserMessage(params: {
       words_per_minute: metrics.words_per_minute,
       filler_words: { total: metrics.filler_words_total, items: metrics.filler_words_items },
       repetitions: { total: metrics.repetition_count, items: metrics.repetition_items },
-      mentioned_sas: metrics.mentioned_sas,
       used_numbers: metrics.used_numbers,
       numbers_detected: metrics.numbers_detected,
       has_cta: metrics.has_cta,

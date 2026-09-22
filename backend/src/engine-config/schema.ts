@@ -103,6 +103,21 @@ export const CriterionSchema = z.object({
   description: z.string().min(1),
 });
 
+// Phase 5 fix (PASS_WITH_FIXES): a named, evidence-checkable requirement
+// this framework wants the evaluator to look for in the transcript (e.g.
+// "mentioned the brand", "cited a specific policy"). Purely config data —
+// the engine never hardcodes which requirements exist, only the generic
+// {id, detected, evidence} shape it asks the LLM to fill in per requirement
+// (see EvaluationResult.detected_requirements in types.ts and
+// evaluatorPromptBuilder.ts). Additive to the EvaluationFramework shape
+// that already existed in Phase 5 — optional/defaulted so no existing
+// framework file needs to change unless it wants this mechanism.
+export const RequirementSchema = z.object({
+  id: IdSchema,
+  description: z.string().min(1),
+});
+export type Requirement = z.infer<typeof RequirementSchema>;
+
 export const DurationPolicySchema = z.object({
   idealSeconds: z.number().positive(),
   maxSeconds: z.number().positive(),
@@ -119,6 +134,12 @@ export const EvaluationFrameworkSchema = z
     maxScore: z.number().positive().default(100),
     criteria: z.array(CriterionSchema).min(1),
     observableRules: z.array(z.string()).default([]),
+    // Optional: named requirements the evaluator must explicitly detect,
+    // see RequirementSchema above. Empty by default — a framework that
+    // only needs criteria/observableRules/mustReward/mustPenalize/
+    // evaluationInstructions (davivienda-v1, grupo-aval-v1) doesn't need
+    // this.
+    requirements: z.array(RequirementSchema).default([]),
     durationPolicy: DurationPolicySchema.optional(),
     mustReward: z.array(z.string()).default([]),
     mustPenalize: z.array(z.string()).default([]),
@@ -135,6 +156,15 @@ export const EvaluationFrameworkSchema = z
         code: "custom",
         message: `criterion ids duplicados: ${[...new Set(dupes)].join(", ")}`,
         path: ["criteria"],
+      });
+    }
+    const reqIds = fw.requirements.map((r) => r.id);
+    const reqDupes = reqIds.filter((id, i) => reqIds.indexOf(id) !== i);
+    if (reqDupes.length > 0) {
+      ctx.addIssue({
+        code: "custom",
+        message: `requirement ids duplicados: ${[...new Set(reqDupes)].join(", ")}`,
+        path: ["requirements"],
       });
     }
     // WEIGHTS_SUM_RULE (documented explicitly, not invented): every
@@ -172,9 +202,9 @@ export const ScenarioSchema = z.object({
   // The agent's opening line (ElevenLabs `first_message`).
   firstMessage: z.string().min(1),
   // Scenario-specific narrative appended to the interviewer's system
-  // prompt: what Sandra needs to demonstrate for THIS scenario, and any
-  // scenario-specific reactive guidance. Free text — the engine doesn't
-  // parse it.
+  // prompt: what the spokesperson needs to demonstrate for THIS scenario,
+  // and any scenario-specific reactive guidance. Free text — the engine
+  // doesn't parse it.
   openingContext: z.string().min(1),
   // What the agent says to close the conversation after the mandatory
   // follow-ups.
