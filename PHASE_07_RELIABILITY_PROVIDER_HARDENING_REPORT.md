@@ -138,7 +138,7 @@ Default 2 horas (el peor caso real de una evaluación es ~1 minuto: 30s timeout 
 
 ## REDACTION_POLICY
 
-`LogFields` es una **whitelist cerrada de tipos**, no una convención: un `logEvent({...})` con un campo fuera de esa interfaz (una API key, `Authorization`, el `signed_url`, el service account, el transcript completo, el body crudo de un provider) falla el chequeo de excess-property de TypeScript en tiempo de compilación — no existe una pasada de "scrub por nombre de campo" en runtime que se pueda olvidar o saltar. Test dedicado (`elevenlabs.test.ts`) verifica además, en runtime, que el valor real del `signed_url` nunca aparece en el JSON logueado.
+**Corrección PASS_WITH_FIXES (P2):** la redacción NO está "garantizada" por TypeScript — el chequeo de excess-property de un objeto literal pasado directamente a `logEvent({...})` es real, pero es una propiedad del compilador, no una garantía de runtime: se puede rodear trivialmente (asignar el objeto a una variable primero, un `as LogFields`, un spread desde una fuente no tipada) sin que nada lo detecte en producción. Lo correcto es describir `LogFields` como **una whitelist tipada** que restringe qué campos son aceptados en los call sites normales (los que ya existen en `evaluator.ts`, `elevenlabs.ts`, `routes.ts`: todos pasan objetos literales, ninguno hace spread de una fuente no tipada) — reduce la superficie de error obvio, no la elimina. No se introduce ningún scrubber en runtime en esta fase; si en el futuro un call site necesita construir el objeto dinámicamente, esa garantía débil deja de aplicar y haría falta una validación explícita en ese punto. Test dedicado (`elevenlabs.test.ts`) verifica en runtime, para el call site real de ElevenLabs, que el valor del `signed_url` no aparece en el JSON logueado — esa es la única garantía verificada, no una propiedad general del sistema de tipos.
 
 ## LATENCY_MEASUREMENT
 
@@ -242,3 +242,47 @@ Ninguno bloqueante para cerrar Fase 7.
 12. **Deuda explícita para Fase 8:** ver `DEFERRED_TO_PHASE_08`.
 
 **No deploy. No Firestore real** (salvo la lectura accidental declarada arriba, sin escritura). **No Fase 8.**
+
+---
+
+## PASS_WITH_FIXES_ADDENDUM
+
+Revisión técnica: `PASS_WITH_FIXES`. Arquitectura y núcleo de la fase aprobados sin rehacer — evaluator validation, lifecycle, logging, versioning, tenant isolation y provider policies quedan intactos. 2 P1 + 1 P2 documental cerrados.
+
+**Commit del fix:** `7d21c24c9f8440e4faaf1e0dcb94cc61a9b7053e`
+
+### P1.1 — ElevenLabs: 200 con body no-JSON
+
+`getSignedUrl()` llamaba `await res.json()` sin capturar el `SyntaxError` que un `200` con HTML o JSON malformado dispara ANTES de llegar a `SignedUrlResponseSchema.safeParse`. Ese error se propagaba sin clasificar: no era `ElevenLabsError`, no tenía `ELEVENLABS_INVALID_RESPONSE`, no generaba el structured log de failure.
+
+Fix ([elevenlabs.ts](backend/src/services/elevenlabs.ts)): `res.json()` ahora está dentro de su propio `try/catch`; cualquier fallo de parseo se clasifica `ELEVENLABS_INVALID_RESPONSE`, loguea `outcome: failure` + la categoría, y lanza un `ElevenLabsError` con un mensaje genérico ("ElevenLabs signed-url response was not valid JSON") — el body crudo nunca se lee para el mensaje público (no hay fallback a `.text()` en esta rama). Timeout (10s) y cero retries sin cambios.
+
+Tests nuevos en `elevenlabs.test.ts`: `200 + HTML` → `ELEVENLABS_INVALID_RESPONSE`; `200 + JSON malformado` → `ELEVENLABS_INVALID_RESPONSE`; el body crudo nunca aparece en `.message`; el structured log tiene `outcome: "failure"` + `error_category: "ELEVENLABS_INVALID_RESPONSE"`.
+
+### P1.2 — Validación de `--hours` en el stale-evaluating sweep
+
+`mark-stale-evaluating-sessions.ts` aceptaba `Number(value)` sin validar — `--hours=-1` produce un cutoff en el FUTURO (`Date.now() - (-1)*3600000`), lo que seleccionaría sesiones `evaluating` legítimas como si fueran stale; `--hours=0`, `abc` (→ `NaN`) e `Infinity` son igual de inválidos.
+
+Fix: nueva función pura `parseHours()` en `backend/scripts/staleEvaluatingArgs.ts` (módulo separado, sin importar Firebase, específicamente para poder testearla sin correr el script — importar el script mismo ejecutaría `main()` al cargar el módulo). Regla: finito y `> 0`; `undefined` (flag ausente) usa el default de 2h. `parseArgs()` en el script corta con mensaje de uso + `process.exit(1)` **antes** de `initFirebase()` si la validación falla — sin query, sin write. Verificado en vivo: `npx tsx mark-stale-evaluating-sessions.ts --hours=-1 --dry-run` sale con el mensaje de error y código 1, sin la línea `[firebase] Firebase Admin inicializado` que aparece cuando el script sí llega a tocar Firebase.
+
+Tests nuevos en `staleEvaluatingArgs.test.ts`: negativo, cero, string no numérico, `Infinity`, `NaN` literal, valor válido, default sin flag.
+
+### P2 — Wording de REDACTION_POLICY
+
+Corregido: la sección ya no afirma que la redacción está "garantizada" por TypeScript. Ahora describe `LogFields` como una whitelist tipada que restringe los campos aceptados en los call sites actuales (todos pasan objetos literales directos a `logEvent`), aclara explícitamente que el chequeo de excess-property es una conveniencia del compilador que se puede rodear (variable intermedia, cast, spread de fuente no tipada), y que no hay scrubber en runtime en esta fase. Mismo ajuste aplicado al comentario correspondiente en `log.ts` para que código y documentación no se contradigan.
+
+### TEST_RESULTS (tras el fix)
+
+```
+backend:  20 archivos, 274 tests, PASS  (262 -> 274: +12 de este addendum)
+frontend:  2 archivos,   8 tests, PASS (sin cambios)
+```
+
+### BUILD (tras el fix)
+
+```
+backend  tsc -p tsconfig.json          → PASS
+frontend tsc -b && vite build          → PASS
+```
+
+No deploy. No Firestore real (la única ejecución real de `mark-stale-evaluating-sessions.ts` en esta ronda fue con `--hours=-1`, que por diseño no llega a `initFirebase()`). No Fase 8.
