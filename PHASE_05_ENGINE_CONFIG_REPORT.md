@@ -457,7 +457,7 @@ Además, el loader real se ejecutó manualmente contra ambos paquetes reales (`s
 **Antes:** `EvaluationResult.detected_requirements` era un objeto fijo con keys client-specific (`mentioned_sas`, `aligned_to_playbook`) mezcladas con métricas deterministas (`used_numbers`, `numbers_detected`, `has_cta`). El `OUTPUT_SCHEMA` universal de `evaluatorPromptBuilder.ts` declaraba esas mismas keys fijas, y `frameworkInputs.metrics` enviaba explícitamente `mentioned_sas: metrics.mentioned_sas`.
 
 **Ahora:**
-- `EvaluationResult.detected_requirements` (`types.ts`) es `Array<{ id: string; detected: boolean; evidence: string }>` — un elemento por cada requirement que el `EvaluationFramework` resuelto declare. Ningún campo con nombre de cliente en el contrato universal.
+- `EvaluationResult.detected_requirements` (`types.ts`) es `Array<{ id: string; detected: boolean; evidence: string }>` — un elemento por cada requirement que el `EvaluationFramework` resuelto declare. Ningún campo con nombre de cliente en el contrato universal. *(Actualizado en la ronda 2 de fixes: gana un cuarto campo, `description`, para que el frontend no tenga que conocer ids de cliente — ver sección 8.)*
 - `used_numbers`/`numbers_detected`/`has_cta` (deterministas, calculados por `metrics.ts`, nunca juzgados por el LLM) se movieron a `EvaluationResult.speech_metrics`, junto al resto de métricas deterministas — separación limpia entre "lo que el engine mide" y "lo que el framework pide verificar".
 - `EvaluationFrameworkSchema` (`engine-config/schema.ts`) gana un campo **aditivo y opcional**: `requirements: Array<{id, description}>` (default `[]`, con su propio chequeo de ids duplicados en el `superRefine` existente). No es un rediseño del schema — frameworks que no lo necesitan (`davivienda-v1`, `grupo-aval-v1`) no se tocaron.
 - `sas-colombia/v1/evaluation-frameworks/generic-v1.json` ahora declara `requirements: [{id: "mentioned_sas", ...}, {id: "aligned_to_playbook", ...}]` — la migración concreta de esos dos campos de TypeScript a config.
@@ -492,26 +492,65 @@ Corrección explícita pedida por la revisión:
 >
 > **End-to-end no-code onboarding: pending dynamic frontend scenario discovery (later phase).** `frontend/src/config.ts` sigue manteniendo los 3 escenarios estáticos de SAS (`TARGETS`) — un cliente nuevo hoy no aparece en la UI de selección sin un cambio de código en el frontend. Esto ya estaba documentado en `KNOWN_LIMITATIONS`/`FRONTEND_COMPATIBILITY` de la versión original de este reporte, pero no estaba dicho con esta precisión; queda explícito aquí para que "backend generico" no se lea como "onboarding completo". No se tocó el frontend en esta ronda de fixes (instrucción explícita de la revisión).
 
-**KNOWN_LIMITATION nueva, descubierta en esta ronda (no corregida — instrucción explícita de no tocar frontend):** `frontend/src/components/Analysis.tsx` lee `evaluation.detected_requirements.{used_numbers, mentioned_sas, has_cta, aligned_to_playbook}` como si `detected_requirements` fuera todavía el objeto fijo de antes. Con el nuevo contrato (`detected_requirements` como array), esas 4 lecturas devuelven `undefined` en runtime — los 4 checkmarks de la sección "Requisitos mínimos" del panel de análisis van a mostrar siempre "✗ no detectado", incluso cuando el backend sí detectó el requirement correspondiente en `detected_requirements[]`. No es un error de compilación (`frontend/src/types.ts` es un contrato estático independiente, no validado contra la respuesta real del backend) y `npm run build` del frontend pasa sin errores. `frontend/src/components/Report.tsx` NO se ve afectado — sus lecturas (`metrics.numbers_detected`, `metrics.has_cta`) vienen de `SpeechMetrics`, que no cambió de forma. Corregir `Analysis.tsx` para leer el nuevo array (y, más de fondo, para renderizar dinámicamente los requirements que el framework resuelto declare en vez de 4 líneas fijas) es trabajo natural de la fase de onboarding no-code de frontend (11/12), consistente con la nota de alcance de arriba — no se adelantó aquí.
+**KNOWN_LIMITATION descubierta en la ronda 1, CORREGIDA en la ronda 2 de fixes (ver sección 8):** `frontend/src/components/Analysis.tsx` leía `evaluation.detected_requirements.{used_numbers, mentioned_sas, has_cta, aligned_to_playbook}` como si `detected_requirements` fuera todavía el objeto fijo de antes — con el nuevo contrato (array), esas 4 lecturas devolvían `undefined` en runtime y los 4 checkmarks de "Requisitos mínimos" mostraban siempre "✗ no detectado" sin importar el resultado real. La revisión calificó esto correctamente como una regresión funcional de contrato (no un rediseño UX futuro) y pidió corregirla en esta misma ronda — ver sección 8 para el fix completo.
 
 ### 7. Versionado: confirmado temporal
 
 Se agregó un comentario explícito (`TEMPORARY_VERSION_SELECTION`) en `engine-config/loader.ts` junto a `pickVersionDir()`, marcando que `entries.sort().reverse()` es un placeholder sin semver real, sin pinning de versión por sesión y sin manejo de `manifest.status` más allá de la elección lexicográfica — y que **no debe sobrevivir** al diseño real de versionado de Fase 6. Cero cambio de comportamiento; el comentario ya existente (`"Phase 5 keeps this deliberately trivial... real version selection is Phase 6"`) se mantuvo y se amplió, no se reemplazó.
 
+### 8. Ronda 2: regresión frontend corregida
+
+**Veredicto de esta ronda:** `PASS_WITH_FIXES` sobre el fix anterior — arquitectura backend aprobada; una única regresión funcional real de contrato frontend/backend, introducida por el cambio de `detected_requirements` de objeto a array en la ronda 1 y no propagada a `frontend/`. **No se tocó `loader.ts`/`resolver.ts`/el modelo de config. No se avanzó a Fase 6. No se implementó discovery dinámico de escenarios.**
+**Commit del fix (código):** `64489f0af83636ee5cb086bf8ee68b46ac6e8d65`
+
+**Diseño elegido para `description` — decisión explícita pedida por la revisión ("si encuentras una solución genérica mejor,úsala y documéntala"):**
+
+En vez de pedirle al LLM que devuelva `description` junto con `id`/`detected`/`evidence` (arriesgando que la parafrasee, la traduzca mal o la omita), **el backend la adjunta después de recibir la respuesta del modelo**, uniendo por `id` contra el MISMO `EvaluationFramework.requirements[]` con el que se construyó el prompt:
+
+- `backend/src/services/evaluator.ts` gana `enrichDetectedRequirements(result, requirements)` — un `Map` de `id → description` sobre `params.resolved.evaluationFramework.requirements`, aplicado a cada entrada de `result.detected_requirements` antes de devolver el resultado desde `evaluatePitch`. Un `id` que el modelo devuelva y no esté declarado en el framework (no debería pasar — el prompt pide exactamente un elemento por requirement declarado) recibe `description: ""`, nunca un texto inventado.
+- `evaluatorPromptBuilder.ts`'s `OUTPUT_SCHEMA` sigue pidiendo solo `{id, detected, evidence}` — se agregó una instrucción explícita en el prompt de sistema: *"NO incluyas 'description' en tu respuesta — el sistema la completa automáticamente desde el framework después."*
+- `backend/src/types.ts`: `EvaluationResult.detected_requirements` es ahora `Array<{ id: string; description: string; detected: boolean; evidence: string }>`.
+
+Esto garantiza que la etiqueta que ve el usuario sea SIEMPRE exactamente el texto de config (`EvaluationFramework.requirements[].description`) — nunca una paráfrasis del LLM ni, mucho menos, algo hardcodeado en el frontend.
+
+Probado en `services/evaluator.test.ts` (2 tests nuevos): `detected_requirements` se enriquece con la `description` del framework resuelto (nunca la envía el LLM, se verifica con un mock de OpenRouter que NO incluye `description` en su respuesta); un `id` no declarado en el framework recibe `description: ""` en vez de un texto inventado.
+
+**`frontend/src/types.ts` sincronizado:**
+- `TargetMode` ensanchado de `"generic" | "davivienda" | "grupo_aval"` a `string` — mismo cambio que ya tenía el backend desde la ronda 1 (scenario ids resueltos por config, ya no un enum cerrado). El selector visual (`frontend/src/config.ts`'s `TARGETS`, su propio `TargetId` de 3 literales, sin cambios) sigue exactamente igual — esto es compatibilidad de wire, no discovery dinámico.
+- `SpeechMetrics`: `mentioned_sas` eliminado (igual que el backend).
+- `EvaluationResult.detected_requirements`: `Array<{ id, description, detected, evidence }>`, igual que el backend.
+- `EvaluationResult.speech_metrics`: gana `used_numbers`/`numbers_detected`/`has_cta` (ya estaban en el backend desde la ronda 1; el frontend no los había sincronizado).
+- **Efecto colateral encontrado por `tsc` al ensanchar `TargetMode`:** `frontend/src/App.tsx`'s `labelFor()` estaba tipada como `(target: TargetId) => string` — con `TargetMode` ya no siendo estructuralmente idéntico a `TargetId` (el `type TargetId` de 3 literales de `config.ts`), pasar `session.target_mode` (ahora `string`) dejó de compilar en sus 2 call sites. La función YA hacía fallback seguro para un id desconocido (`TARGETS.find(...)?.label ?? target`), así que el fix es solo ensanchar su parámetro a `string` — coincide con lo que la función ya hacía en runtime, no es lógica nueva.
+
+**`frontend/src/components/Analysis.tsx`:**
+- Se eliminó `const req = e.detected_requirements` y las 4 lecturas fijas (`req.used_numbers`, `req.mentioned_sas`, `req.has_cta`, `req.aligned_to_playbook`).
+- `Incluyó cifra` y `Call to action` ahora leen `metrics.used_numbers`/`metrics.has_cta` (la prop `SpeechMetrics`, determinista, sin cambios de forma) — nunca de `detected_requirements`.
+- El resto de la lista se renderiza dinámicamente: `evaluation.detected_requirements.map((r) => ...)`, mostrando `r.description`, el check de `r.detected`, y `r.evidence` (si no está vacía) como texto secundario. Cero ids hardcodeados — un requirement nuevo de cualquier framework aparece automáticamente sin tocar este componente.
+- `frontend/src/styles.css`: una regla nueva, `.checklist li .req-evidence`, para el texto secundario de evidencia — mismo estilo visual que `.cmt`/`.metric-comment` ya usados en la misma pantalla.
+
+**Tests nuevos — `frontend/src/components/Analysis.test.tsx` (4, archivo nuevo):** usa `react-dom/server`'s `renderToStaticMarkup` (ya disponible vía la dependencia existente `react-dom`, sin agregar jsdom/Testing Library para dos pantallas de solo lectura) para verificar, contra HTML realmente renderizado: (1) requirements de SAS (`mentioned_sas`, `aligned_to_playbook`) se muestran solo porque llegaron en los datos, con su `description`/`evidence`, sin ninguna rama por id; (2) un requirement ficticio de otro cliente (`verifiable_data`) se renderiza por el mismo código, sin branch client-specific; (3) un `detected_requirements: []` no rompe el render y no queda ningún rastro de las keys viejas (`mentioned_sas`, `aligned_to_playbook`); (4) `Incluyó cifra`/`Call to action` reflejan `metrics.used_numbers`/`metrics.has_cta` independientemente de `detected_requirements`.
+
+**Confirmación de alcance (sin cambios respecto a la ronda 1):**
+
+> **Backend content-push contract: achieved.**
+> **End-to-end no-code onboarding: pending dynamic frontend scenario discovery (later phase).**
+
+El fix de esta ronda es compatibilidad de contrato (que el frontend deje de romperse con el shape real del backend) — no agrega discovery dinámico de escenarios ni toca `frontend/src/config.ts`'s lista estática de 3 escenarios. Esa sigue siendo, explícitamente, la Fase 11/12.
+
 ### Resultados
 
 ```
 $ npm test
-backend:  Test Files  16 passed (16) | Tests  185 passed (185)
-frontend: Test Files   1 passed (1)  | Tests    4 passed (4)
+backend:  Test Files  16 passed (16) | Tests  187 passed (187)
+frontend: Test Files   2 passed (2)  | Tests    8 passed (8)
 ```
 
-(185 backend = 173 de la versión original de Fase 5 + 12 nuevas: 4 en `services/metrics.test.ts` + 5 en `engine/evaluatorPromptBuilder.test.ts` + 3 en `engine-config/schema.test.ts` + 1 en `repositories/sessions.test.ts` — la resta a 173+12=185 cuadra porque además se agregó 1 archivo de test nuevo, `metrics.test.ts`, contado en "Test Files".)
+(187 backend = 185 de la ronda 1 + 2 nuevas en `services/evaluator.test.ts` — enrichment de `description` y fallback a `""` para un id no declarado. 8 frontend = 4 de siempre en `api.test.ts` + 4 nuevas en `components/Analysis.test.tsx`, archivo nuevo.)
 
 ```
 $ npm run build
 backend:  tsc -p tsconfig.json  -> sin errores
-frontend: tsc -b && vite build  -> sin errores (cero archivos de frontend modificados)
+frontend: tsc -b && vite build  -> sin errores (incluye el fix de labelFor())
 ```
 
 **No se desplegó. No se avanzó a Fase 6.**
