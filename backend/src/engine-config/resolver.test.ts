@@ -72,14 +72,17 @@ function fakeLoader(packages: Record<string, ConfigPackage>): ConfigPackageLoade
   };
 }
 
-// recordedHashesByOrgVersion, keyed `${organizationId}::${version}`: when
-// absent for a given (org, version), getVersion returns null and the
-// resolver's drift check is a no-op (existing tests don't care about
-// hashes) — pass an explicit entry to simulate a real activation-time
-// hash, matching or not, per test.
+// recordOverrides, keyed `${organizationId}::${version}`: a verifiable
+// version record is now a REQUIRED precondition (not an optional bonus
+// check), so the DEFAULT here is a matching, `active` record — a hash
+// equal to what fakeLoader computes (`fake-hash:${org}:${version}`) —
+// so tests that don't care about drift get the "happy path" for free.
+// Pass an explicit override to simulate an absent record (`null`), a
+// record missing configHash, a non-"active" status, or a mismatched
+// hash — anything a real registry could plausibly return.
 function fakeRegistry(
   activeByOrg: Record<string, string | null>,
-  recordedHashesByOrgVersion: Record<string, string> = {}
+  recordOverrides: Record<string, { configHash?: string; status?: "draft" | "active" | "deprecated" } | null> = {}
 ): ConfigVersionRegistry {
   return {
     async resolveActiveVersion(organizationId: string) {
@@ -87,8 +90,8 @@ function fakeRegistry(
     },
     async getVersion(organizationId: string, version: string) {
       const key = `${organizationId}::${version}`;
-      if (!(key in recordedHashesByOrgVersion)) return null;
-      return { configHash: recordedHashesByOrgVersion[key] };
+      if (key in recordOverrides) return recordOverrides[key];
+      return { configHash: `fake-hash:${organizationId}:${version}`, status: "active" as const };
     },
   };
 }
@@ -171,12 +174,15 @@ describe("resolveScenarioConfigForNewSession", () => {
     expect(afterActivation.outcome === "resolved" && afterActivation.config.configVersion).toBe("v2");
   });
 
-  it("CONFIG_DRIFT_DETECTION: refuses a new session when the active version's files were edited since activation", async () => {
+  it("CONFIG_DRIFT_DETECTION: refuses a new session when the active version's files were edited since activation (hash mismatch)", async () => {
     const loader = fakeLoader({ "org-a::v1": pkgFor("org-a", "v1", ["generic"]) });
     // Registry recorded "AAA" when v1 was activated; the loader (i.e. the
     // files on disk right now) hashes to something else — simulating an
     // in-place edit after activation, without re-activating.
-    const registry = fakeRegistry({ "org-a": "v1" }, { "org-a::v1": "AAA-stale-hash-from-activation" });
+    const registry = fakeRegistry(
+      { "org-a": "v1" },
+      { "org-a::v1": { configHash: "AAA-stale-hash-from-activation", status: "active" } }
+    );
 
     const result = await resolveScenarioConfigForNewSession(
       { organizationId: "org-a", scenarioId: "generic" },
@@ -185,11 +191,54 @@ describe("resolveScenarioConfigForNewSession", () => {
     expect(result.outcome).toBe("no_config_for_organization");
   });
 
-  it("no drift: the registry's recorded hash matching the current file hash resolves normally", async () => {
+  it("1. activeVersion=v1 but getVersion(v1) returns no record at all -> fail closed", async () => {
     const loader = fakeLoader({ "org-a::v1": pkgFor("org-a", "v1", ["generic"]) });
-    // fakeLoader's hash convention is `fake-hash:${org}:${version}` —
-    // recording exactly that simulates "activation and files agree".
-    const registry = fakeRegistry({ "org-a": "v1" }, { "org-a::v1": "fake-hash:org-a:v1" });
+    const registry = fakeRegistry({ "org-a": "v1" }, { "org-a::v1": null });
+
+    const result = await resolveScenarioConfigForNewSession(
+      { organizationId: "org-a", scenarioId: "generic" },
+      { loader, registry }
+    );
+    expect(result.outcome).toBe("no_config_for_organization");
+  });
+
+  it("2. activeVersion=v1 with a record that has no configHash at all -> fail closed (not skipped)", async () => {
+    const loader = fakeLoader({ "org-a::v1": pkgFor("org-a", "v1", ["generic"]) });
+    // A record that exists and is "active" but was never given a hash —
+    // the earlier (fixed) version of this check treated this as "nothing
+    // to compare against" and let the session through. Now required.
+    const registry = fakeRegistry({ "org-a": "v1" }, { "org-a::v1": { status: "active" } });
+
+    const result = await resolveScenarioConfigForNewSession(
+      { organizationId: "org-a", scenarioId: "generic" },
+      { loader, registry }
+    );
+    expect(result.outcome).toBe("no_config_for_organization");
+  });
+
+  it("3. pointer says v1 but that version's record is deprecated -> fail closed", async () => {
+    const loader = fakeLoader({ "org-a::v1": pkgFor("org-a", "v1", ["generic"]) });
+    // Hash matches (so this isn't a hash-mismatch case) but status
+    // contradicts the pointer — an inconsistency worth refusing on its
+    // own.
+    const registry = fakeRegistry(
+      { "org-a": "v1" },
+      { "org-a::v1": { configHash: "fake-hash:org-a:v1", status: "deprecated" } }
+    );
+
+    const result = await resolveScenarioConfigForNewSession(
+      { organizationId: "org-a", scenarioId: "generic" },
+      { loader, registry }
+    );
+    expect(result.outcome).toBe("no_config_for_organization");
+  });
+
+  it("4. record active + hash correcto -> resuelve normalmente", async () => {
+    const loader = fakeLoader({ "org-a::v1": pkgFor("org-a", "v1", ["generic"]) });
+    const registry = fakeRegistry(
+      { "org-a": "v1" },
+      { "org-a::v1": { configHash: "fake-hash:org-a:v1", status: "active" } }
+    );
 
     const result = await resolveScenarioConfigForNewSession(
       { organizationId: "org-a", scenarioId: "generic" },

@@ -25,7 +25,7 @@
 
 import { FileConfigPackageLoader, type ConfigPackageLoader } from "./loader.js";
 import * as configVersionsRepo from "../repositories/configVersions.js";
-import type { ResolvedScenarioConfig } from "./schema.js";
+import type { ResolvedScenarioConfig, ConfigVersionStatus } from "./schema.js";
 
 const defaultLoader = new FileConfigPackageLoader();
 
@@ -42,12 +42,20 @@ const defaultLoader = new FileConfigPackageLoader();
 // in place to BBB afterward (a direct violation of IMMUTABILITY_POLICY —
 // see the Phase 6 report) would keep silently serving BBB to brand new
 // sessions forever, with nothing in the system ever noticing.
+//
+// PASS_WITH_FIXES (2nd round): the earlier version of this check only
+// fired when `activeRecord?.configHash` was truthy — an ABSENT record or
+// a record with no `configHash` silently skipped the comparison and let
+// the session start anyway. A verifiable version record (one that
+// exists, carries a configHash, and — when status is available — is
+// actually `active`) is now a REQUIRED precondition, not an optional
+// bonus check.
 export interface ConfigVersionRegistry {
   resolveActiveVersion(organizationId: string): Promise<string | null>;
   getVersion(
     organizationId: string,
     version: string
-  ): Promise<{ configHash?: string } | null>;
+  ): Promise<{ configHash?: string; status?: ConfigVersionStatus } | null>;
 }
 const defaultRegistry: ConfigVersionRegistry = {
   resolveActiveVersion: configVersionsRepo.resolveActiveVersion,
@@ -136,24 +144,46 @@ export async function resolveScenarioConfigForNewSession(
     return { outcome: "no_config_for_organization", errors: result.errors };
   }
 
-  // CONFIG_DRIFT_DETECTION: the registry's activation-time hash must
-  // still match what's on disk right now. A mismatch means the files for
-  // the ACTIVE version were edited in place after activation — exactly
-  // the IMMUTABILITY_POLICY violation activateConfigVersion() refuses on
-  // re-activation, caught here too so it can't silently start serving
-  // NEW sessions between activations. Fail closed; the client only ever
-  // sees the same generic "no config available" — the specific integrity
-  // reason stays server-side (see routes.ts's console.error).
+  // CONFIG_DRIFT_DETECTION: a NEW session may only start against a
+  // VERIFIABLE active version record — one that exists, carries a
+  // configHash, and (when status is available) is genuinely `active`.
+  // Any absence or inconsistency fails closed with the SAME generic
+  // outcome/errors[] shape as every other config problem here — the
+  // client only ever sees "no config available"; the specific integrity
+  // reason stays server-side (see routes.ts's console.error for this
+  // outcome).
   const activeRecord = await registry.getVersion(params.organizationId, activeVersion);
-  if (activeRecord?.configHash && activeRecord.configHash !== result.hash) {
-    return {
-      outcome: "no_config_for_organization",
-      errors: [
-        `CONFIG_INTEGRITY_DRIFT: la versión active "${activeVersion}" de organizationId="${params.organizationId}" ` +
-          `fue registrada con hash "${activeRecord.configHash}" pero los archivos en disco ahora hashean a ` +
-          `"${result.hash}" — contenido modificado en sitio sin re-activar (viola IMMUTABILITY_POLICY).`,
-      ],
-    };
+  const integrityDrift = (reason: string) => ({
+    outcome: "no_config_for_organization" as const,
+    errors: [
+      `CONFIG_INTEGRITY_DRIFT: ${reason} — organizationId="${params.organizationId}" activeVersion="${activeVersion}".`,
+    ],
+  });
+
+  if (!activeRecord) {
+    // The pointer says this version is active, but the registry has no
+    // record for it at all — cannot verify anything about it. Never
+    // treat "unverifiable" as "presumably fine".
+    return integrityDrift("el pointer active no tiene un version record verificable");
+  }
+  if (!activeRecord.configHash) {
+    return integrityDrift("el version record active no tiene configHash registrado");
+  }
+  if (activeRecord.status !== undefined && activeRecord.status !== "active") {
+    return integrityDrift(
+      `el version record correspondiente al pointer tiene status="${activeRecord.status}", no "active"`
+    );
+  }
+  if (activeRecord.configHash !== result.hash) {
+    // A mismatch means the files for the ACTIVE version were edited in
+    // place after activation — exactly the IMMUTABILITY_POLICY violation
+    // activateConfigVersion() refuses on re-activation, caught here too
+    // so it can't silently start serving NEW sessions between
+    // activations.
+    return integrityDrift(
+      `hash registrado ("${activeRecord.configHash}") no coincide con el hash actual de los archivos ("${result.hash}") ` +
+        `— contenido modificado en sitio sin re-activar (viola IMMUTABILITY_POLICY)`
+    );
   }
 
   return assembleConfig(params.organizationId, activeVersion, result.hash, result.pkg, params.scenarioId);
