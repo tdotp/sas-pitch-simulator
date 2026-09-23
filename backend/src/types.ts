@@ -214,8 +214,15 @@ export interface EvaluationResult {
   // in engine-config/schema.ts) — adding, removing or renaming a
   // requirement for any client is a config change, never a change to this
   // type or to engine code. `id` mirrors the framework's requirement id.
+  // `description` is never produced by the LLM — services/evaluator.ts
+  // enriches the model's {id, detected, evidence} with the matching
+  // EvaluationFramework.requirements[].description AFTER the model
+  // responds (see enrichDetectedRequirements). This keeps the label
+  // authoritative from config always, never a client-specific string
+  // baked into a prompt or invented by the frontend/LLM.
   detected_requirements: Array<{
     id: string;
+    description: string;
     detected: boolean;
     evidence: string;
   }>;

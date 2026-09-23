@@ -168,6 +168,32 @@ async function attemptEvaluation(
   return parsed;
 }
 
+// PASS_WITH_FIXES (second round): the model is asked for {id, detected,
+// evidence} only — never a description, see evaluatorPromptBuilder.ts's
+// OUTPUT_SCHEMA. This is the ONE place `description` gets attached,
+// joined from the SAME EvaluationFramework.requirements the prompt was
+// built from — so the label the frontend renders is always exactly the
+// config text, never something the LLM paraphrased or a frontend guessed
+// from a client-specific id. An id the model returns that isn't in the
+// framework's declared requirements (shouldn't happen; the prompt asks
+// for exactly one entry per declared id) gets an empty description rather
+// than a fabricated one.
+function enrichDetectedRequirements(
+  result: EvaluationResult,
+  requirements: ResolvedScenarioConfig["evaluationFramework"]["requirements"]
+): EvaluationResult {
+  const descriptionById = new Map(requirements.map((r) => [r.id, r.description]));
+  return {
+    ...result,
+    detected_requirements: (result.detected_requirements ?? []).map((r) => ({
+      id: r.id,
+      detected: r.detected,
+      evidence: r.evidence,
+      description: descriptionById.get(r.id) ?? "",
+    })),
+  };
+}
+
 // Distinguishes transient (worth one bounded retry) from non-transient
 // failures, and carries a safe category for persistence — without
 // leaking the raw message past where it's meant to be logged. Exported
@@ -208,7 +234,8 @@ export async function evaluatePitch(params: {
   let lastError: EvaluationError | null = null;
   for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {
     try {
-      return await attemptEvaluation(systemPrompt, userMessage, params.resolved.scenario.id, params.sessionId);
+      const result = await attemptEvaluation(systemPrompt, userMessage, params.resolved.scenario.id, params.sessionId);
+      return enrichDetectedRequirements(result, params.resolved.evaluationFramework.requirements);
     } catch (err) {
       const evalErr =
         err instanceof EvaluationError

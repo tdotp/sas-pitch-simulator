@@ -203,6 +203,7 @@ button { color: inherit; }
 
 .checklist { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; list-style: none; padding: 0; margin: 0; }
 .checklist li { display: flex; align-items: center; gap: 12px; padding: 16px 18px; border: 1px solid var(--line-soft); border-radius: 10px; background: rgba(255,255,255,.4); color: #2c2f37; font-size: 15px; }
+.checklist li .req-evidence { display: block; color: #62656f; font-size: 12px; margin-top: 2px; }
 .check-yes { color: var(--success); font-weight: 700; }
 .check-no { color: var(--red); font-weight: 700; }
 .check-partial { color: var(--amber); font-weight: 700; }

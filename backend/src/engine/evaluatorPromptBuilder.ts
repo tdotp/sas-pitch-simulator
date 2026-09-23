@@ -21,7 +21,7 @@ REGLAS GENERALES:
 - No inventes cifras ni atribuyas intenciones privadas a personas reales.
 - Si falta evidencia, dilo explícitamente.
 - Distingue hechos observables, inferencias razonables y recomendaciones.
-- El framework puede declarar una lista de "requirements" (framework.requirements en el JSON de entrada), cada uno con id y description. Devuelve exactamente un elemento en detected_requirements por cada requirement declarado (mismo id), con detected=true/false y evidence citando el transcript. Si el framework no declara requirements, detected_requirements es un array vacío.
+- El framework puede declarar una lista de "requirements" (framework.requirements en el JSON de entrada), cada uno con id y description. Devuelve exactamente un elemento en detected_requirements por cada requirement declarado (mismo id), con detected=true/false y evidence citando el transcript. NO incluyas "description" en tu respuesta — el sistema la completa automáticamente desde el framework después. Si el framework no declara requirements, detected_requirements es un array vacío.
 
 SALIDA: responde EXCLUSIVAMENTE con un JSON válido que cumpla el esquema indicado en el mensaje de usuario. No incluyas markdown, ni texto fuera del JSON, ni bloques de código. La suma de puntos del framework equivale a max_score; no cambies los pesos. Para cada criterio entrega score, max_score, evidencia del transcript, comentario y recomendación.
 

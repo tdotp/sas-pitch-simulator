@@ -1,6 +1,12 @@
 // Shared shapes mirrored from the backend (evaluation contract).
 
-export type TargetMode = "generic" | "davivienda" | "grupo_aval";
+// PASS_WITH_FIXES (Phase 5, 2nd round): the backend's `TargetMode` widened
+// to a plain string in Phase 5 (scenario ids are now config-resolved, not
+// a closed enum — see backend/src/types.ts). Widened here too so this
+// contract stays synced. The 3-scenario static selector
+// (frontend/src/config.ts's TARGETS) is unchanged — this is minimal wire
+// compatibility, not dynamic scenario discovery (that's a later phase).
+export type TargetMode = string;
 export type VoiceGender = "male" | "female" | "random";
 
 export interface TranscriptTurn {
@@ -32,7 +38,6 @@ export interface SpeechMetrics {
   repetition_count: number;
   repetition_items: string[];
   long_pauses_count: number;
-  mentioned_sas: boolean;
   used_numbers: boolean;
   numbers_detected: string[];
   has_cta: boolean;
@@ -53,13 +58,17 @@ export interface EvaluationResult {
     status: "ideal" | "aceptable" | "largo" | "fuera_de_rango";
     comment: string;
   };
-  detected_requirements: {
-    mentioned_sas: boolean;
-    used_numbers: boolean;
-    numbers_detected: string[];
-    has_cta: boolean;
-    aligned_to_playbook: boolean;
-  };
+  // PASS_WITH_FIXES (2nd round): generic list, one entry per requirement
+  // declared by the resolved EvaluationFramework — no client-specific
+  // field names in this contract. `description` always comes from the
+  // framework's config (backend/src/services/evaluator.ts's
+  // enrichDetectedRequirements), never invented here.
+  detected_requirements: Array<{
+    id: string;
+    description: string;
+    detected: boolean;
+    evidence: string;
+  }>;
   speech_metrics: {
     word_count: number;
     words_per_minute: number;
@@ -68,6 +77,9 @@ export interface EvaluationResult {
     repetition_count: number;
     top_repetitions: string[];
     long_pauses_count: number;
+    used_numbers: boolean;
+    numbers_detected: string[];
+    has_cta: boolean;
     comment: string;
   };
   criteria_scores: Array<{

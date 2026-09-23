@@ -25,7 +25,12 @@ type Stage =
   | "analysis"
   | "error";
 
-function labelFor(target: TargetId): string {
+// `target` is `session.target_mode`, which is a plain string since
+// backend Phase 5 (scenario ids are config-resolved, no longer a closed
+// enum) — this already falls back to the raw id for anything not in the
+// static TARGETS list, so widening the param type just matches what the
+// function already does at runtime.
+function labelFor(target: string): string {
   return TARGETS.find((t) => t.id === target)?.label ?? target;
 }
 

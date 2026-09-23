@@ -23,7 +23,6 @@ export function Analysis({
   onContinue: () => void;
 }) {
   const e = evaluation;
-  const req = e.detected_requirements;
   const durationOk =
     e.duration.status === "ideal"
       ? true
@@ -50,18 +49,27 @@ export function Analysis({
           <li>
             <Check ok={durationOk} /> Duración ({e.duration.formatted})
           </li>
+          {/* Señales deterministas y genéricas: vienen de metrics/
+              speech_metrics, nunca de detected_requirements. */}
           <li>
-            <Check ok={req.used_numbers} /> Incluyó cifra
+            <Check ok={metrics.used_numbers} /> Incluyó cifra
           </li>
           <li>
-            <Check ok={req.mentioned_sas} /> Mencionó SAS
+            <Check ok={metrics.has_cta} /> Call to action
           </li>
-          <li>
-            <Check ok={req.has_cta} /> Call to action
-          </li>
-          <li>
-            <Check ok={req.aligned_to_playbook} /> Alineación al playbook
-          </li>
+          {/* Requirements definidos por el framework de este cliente —
+              renderizados dinámicamente, sin ids hardcodeados. Un cliente
+              nuevo con requirements distintos no necesita ningún cambio
+              aquí. */}
+          {e.detected_requirements.map((r) => (
+            <li key={r.id}>
+              <Check ok={r.detected} />
+              <span>
+                {r.description}
+                {r.evidence && <span className="req-evidence">{r.evidence}</span>}
+              </span>
+            </li>
+          ))}
         </ul>
 
         {/* Métricas de habla */}

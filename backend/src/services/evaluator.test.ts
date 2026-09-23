@@ -111,6 +111,65 @@ describe("evaluatePitch", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("enriches detected_requirements with the description from the resolved framework's requirements, never from the LLM", async () => {
+    const resolvedWithRequirements = {
+      ...minimalResolved,
+      evaluationFramework: {
+        ...minimalResolved.evaluationFramework,
+        requirements: [
+          { id: "mentioned_sas", description: "Menciona SAS de forma natural." },
+          { id: "aligned_to_playbook", description: "Alineado con el playbook." },
+        ],
+      },
+    };
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      jsonResponse({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                overall_score: 80,
+                detected_requirements: [
+                  { id: "mentioned_sas", detected: true, evidence: "cita 1" },
+                  { id: "aligned_to_playbook", detected: false, evidence: "" },
+                ],
+              }),
+            },
+          },
+        ],
+      })
+    );
+
+    const result = await evaluatePitch({ ...baseParams, resolved: resolvedWithRequirements });
+
+    expect(result.detected_requirements).toEqual([
+      { id: "mentioned_sas", detected: true, evidence: "cita 1", description: "Menciona SAS de forma natural." },
+      { id: "aligned_to_playbook", detected: false, evidence: "", description: "Alineado con el playbook." },
+    ]);
+  });
+
+  it("gives an empty description (never fabricated) for an id the model returns that isn't in the framework's requirements", async () => {
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      jsonResponse({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                overall_score: 80,
+                detected_requirements: [{ id: "unexpected_id", detected: true, evidence: "x" }],
+              }),
+            },
+          },
+        ],
+      })
+    );
+
+    const result = await evaluatePitch(baseParams); // minimalResolved has requirements: []
+    expect(result.detected_requirements).toEqual([
+      { id: "unexpected_id", detected: true, evidence: "x", description: "" },
+    ]);
+  });
+
   it("retries once on a transient 503, then succeeds", async () => {
     const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
     fetchMock
