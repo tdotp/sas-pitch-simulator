@@ -10,6 +10,8 @@ import type { ResolvedScenarioConfig } from "../engine-config/schema.js";
 function resolvedFor(organizationId: string): ResolvedScenarioConfig {
   return {
     organizationId,
+    configVersion: "v1",
+    configHash: "fake-hash",
     client: { organizationId, defaultLanguage: "es", settings: {} },
     scenario: {
       id: "generic",

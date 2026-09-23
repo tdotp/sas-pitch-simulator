@@ -42,6 +42,8 @@ function okOpenRouterResponse(overall_score = 80) {
 // (they're tested for real in engine/evaluatorPromptBuilder.test.ts).
 const minimalResolved = {
   organizationId: "org-test",
+  configVersion: "v1",
+  configHash: "fake-hash",
   client: { organizationId: "org-test", defaultLanguage: "es", settings: {} },
   scenario: {
     id: "generic",

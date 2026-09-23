@@ -57,20 +57,27 @@ vi.mock("./services/elevenlabs.js", () => ({
   ),
 }));
 
-// Phase 5: /session/start and /session/end resolve scenario config via
-// this module instead of branching on a hardcoded TargetMode. Mocked with
-// a generic default (any organizationId + a known scenario id resolves to
-// a fixture) so the ~30 existing tests using target_mode: "generic" keep
-// working unchanged; individual Phase 5 tests override this to exercise
-// scenario_not_found / no_config_for_organization / per-organization
-// distinct configs. The REAL loader/resolver (against the actual shipped
-// fixture packages backend/config-packages/sas-colombia,/acme-demo) is
-// tested separately and without mocks in engine-config/loader.test.ts and
+// Phase 5/6: /session/start and /session/end resolve scenario config via
+// TWO SEPARATE functions (see RESOLUTION_API in
+// PHASE_06_CONFIG_VERSIONING_PROVENANCE_REPORT.md) instead of branching
+// on a hardcoded TargetMode. Mocked with a generic default (any
+// organizationId + a known scenario id resolves to a fixture pinned to
+// whichever configVersion the caller asked for — "v1" for new sessions
+// unless a test overrides) so the ~30 existing tests using
+// target_mode: "generic" keep working unchanged; individual Phase 5/6
+// tests override these to exercise scenario_not_found /
+// no_config_for_organization / unknown_config_version / per-organization
+// distinct configs / per-version distinct configs. The REAL
+// loader/resolver (against the actual shipped fixture packages
+// backend/config-packages/sas-colombia,/acme-demo) is tested separately
+// and without mocks in engine-config/loader.test.ts and
 // engine-config/resolver.test.ts.
 const KNOWN_SCENARIO_IDS = ["generic", "davivienda", "grupo_aval"];
-function fixtureResolvedScenario(organizationId: string, scenarioId: string) {
+function fixtureResolvedScenario(organizationId: string, scenarioId: string, configVersion = "v1") {
   return {
     organizationId,
+    configVersion,
+    configHash: `hash-${organizationId}-${configVersion}`,
     client: { organizationId, defaultLanguage: "es", settings: {} },
     scenario: {
       id: scenarioId,
@@ -94,8 +101,12 @@ function fixtureResolvedScenario(organizationId: string, scenarioId: string) {
       voice: { slot: "random" },
     },
     evaluationFramework: {
-      id: "f1",
-      name: "F",
+      // Version-scoped id — the concrete signal the "key integration
+      // test" (Phase 6 describe block below) checks to prove /session/end
+      // evaluated against the PINNED version's framework, not whatever is
+      // active at the time /session/end runs.
+      id: `f1-${configVersion}`,
+      name: `F ${configVersion}`,
       maxScore: 100,
       criteria: [{ id: "a", name: "A", weight: 100, description: "d" }],
       observableRules: [],
@@ -107,9 +118,11 @@ function fixtureResolvedScenario(organizationId: string, scenarioId: string) {
     contentSources: [],
   };
 }
-const resolveScenarioConfigMock = vi.fn();
+const resolveScenarioConfigForNewSessionMock = vi.fn();
+const resolveScenarioConfigForVersionMock = vi.fn();
 vi.mock("./engine-config/resolver.js", () => ({
-  resolveScenarioConfig: (...args: unknown[]) => resolveScenarioConfigMock(...args),
+  resolveScenarioConfigForNewSession: (...args: unknown[]) => resolveScenarioConfigForNewSessionMock(...args),
+  resolveScenarioConfigForVersion: (...args: unknown[]) => resolveScenarioConfigForVersionMock(...args),
 }));
 
 const evaluatePitchMock = vi.fn(async () => ({
@@ -297,11 +310,28 @@ beforeEach(() => {
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
   }));
-  resolveScenarioConfigMock.mockReset();
-  resolveScenarioConfigMock.mockImplementation(
+  resolveScenarioConfigForNewSessionMock.mockReset();
+  resolveScenarioConfigForNewSessionMock.mockImplementation(
     async ({ organizationId, scenarioId }: { organizationId: string; scenarioId: string }) => {
       if (KNOWN_SCENARIO_IDS.includes(scenarioId)) {
-        return { outcome: "resolved", config: fixtureResolvedScenario(organizationId, scenarioId) };
+        return { outcome: "resolved", config: fixtureResolvedScenario(organizationId, scenarioId, "v1") };
+      }
+      return { outcome: "scenario_not_found" };
+    }
+  );
+  resolveScenarioConfigForVersionMock.mockReset();
+  resolveScenarioConfigForVersionMock.mockImplementation(
+    async ({
+      organizationId,
+      scenarioId,
+      configVersion,
+    }: {
+      organizationId: string;
+      scenarioId: string;
+      configVersion: string;
+    }) => {
+      if (KNOWN_SCENARIO_IDS.includes(scenarioId)) {
+        return { outcome: "resolved", config: fixtureResolvedScenario(organizationId, scenarioId, configVersion) };
       }
       return { outcome: "scenario_not_found" };
     }
@@ -1107,7 +1137,7 @@ describe("Phase 5: ENGINE vs CONFIG", () => {
       .send({ target_mode: "davivienda" }); // wire-compat field, treated as scenarioId
 
     expect(res.status).toBe(200);
-    expect(resolveScenarioConfigMock).toHaveBeenCalledWith(
+    expect(resolveScenarioConfigForNewSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({ organizationId: "org-1", scenarioId: "davivienda" })
     );
     const stored = sessionsStore.get(res.body.session_id);
@@ -1129,7 +1159,7 @@ describe("Phase 5: ENGINE vs CONFIG", () => {
   });
 
   it("POST /session/start when the organization has no valid config package -> 503, no internal details leaked", async () => {
-    resolveScenarioConfigMock.mockResolvedValueOnce({
+    resolveScenarioConfigForNewSessionMock.mockResolvedValueOnce({
       outcome: "no_config_for_organization",
       errors: ["manifest.json: parse error at line 3", "/secret/internal/path/leaked"],
     });
@@ -1178,7 +1208,7 @@ describe("Phase 5: ENGINE vs CONFIG", () => {
       .send({ target_mode: "grupo_aval" });
     const sessionId = startRes.body.session_id as string;
 
-    resolveScenarioConfigMock.mockClear();
+    resolveScenarioConfigForVersionMock.mockClear();
     const endRes = await request(app)
       .post("/api/session/end")
       .set("Authorization", "Bearer t1")
@@ -1193,10 +1223,173 @@ describe("Phase 5: ENGINE vs CONFIG", () => {
 
     expect(endRes.status).toBe(200);
     // Re-resolved using the session's OWN persisted scenario_id
-    // ("grupo_aval"), not the body's "davivienda".
-    expect(resolveScenarioConfigMock).toHaveBeenCalledWith(
-      expect.objectContaining({ organizationId: "org-1", scenarioId: "grupo_aval" })
+    // ("grupo_aval") AND its pinned config_version ("v1"), not the
+    // body's "davivienda".
+    expect(resolveScenarioConfigForVersionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: "org-1", scenarioId: "grupo_aval", configVersion: "v1" })
     );
     expect(endRes.body.target_mode).toBe("grupo_aval");
+  });
+});
+
+// Phase 6: SESSION_PINNING — a config version activated AFTER
+// /session/start must have ZERO effect on that session's /session/end.
+// See TEST_DE_INTEGRACIÓN_CLAVE in
+// PHASE_06_CONFIG_VERSIONING_PROVENANCE_REPORT.md — this describe block
+// is that test, plus the surrounding legacy/deprecation/unknown-version
+// fail-closed policies.
+describe("Phase 6: CONFIG VERSIONING + PROVENANCE", () => {
+  it("THE KEY TEST: session pinned to v1 stays on v1 even after v2 is activated before /session/end runs", async () => {
+    const app = buildApp();
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+
+    // "org-1 v1 ACTIVE" -> /session/start -> Session S, config_version = v1.
+    const startRes = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    expect(startRes.status).toBe(200);
+    const sessionId = startRes.body.session_id as string;
+    expect(sessionsStore.get(sessionId)?.config_provenance).toMatchObject({ config_version: "v1" });
+
+    // "activar v2" — simulated at the resolution layer: from now on the
+    // registry/active pointer would say v2, but /session/end never asks
+    // it anything; it resolves the PINNED version straight from the
+    // session record. Nothing in routes.ts changes to make this true —
+    // that's the point.
+    const endRes = await request(app)
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({ session_id: sessionId, duration_seconds: 30, transcript: [{ role: "user", text: "hola" }] });
+
+    expect(endRes.status).toBe(200);
+    // "evaluator recibe framework de v1, NO framework de v2":
+    expect(resolveScenarioConfigForVersionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ configVersion: "v1" })
+    );
+    const evaluateCall = evaluatePitchMock.mock.calls[evaluatePitchMock.mock.calls.length - 1][0];
+    expect(evaluateCall.resolved.evaluationFramework.id).toBe("f1-v1");
+    expect(evaluateCall.resolved.evaluationFramework.id).not.toBe("f1-v2");
+
+    // "/session/start S2" (after v2 is active) -> uses v2.
+    resolveScenarioConfigForNewSessionMock.mockImplementationOnce(
+      async ({ organizationId, scenarioId }: { organizationId: string; scenarioId: string }) => ({
+        outcome: "resolved",
+        config: fixtureResolvedScenario(organizationId, scenarioId, "v2"),
+      })
+    );
+    const start2Res = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    expect(start2Res.status).toBe(200);
+    expect(sessionsStore.get(start2Res.body.session_id)?.config_provenance).toMatchObject({
+      config_version: "v2",
+    });
+  });
+
+  it("POST /session/start persists config_provenance with version/interviewer/framework/content ids from the resolved config", async () => {
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const res = await request(buildApp())
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+
+    expect(res.status).toBe(200);
+    const stored = sessionsStore.get(res.body.session_id);
+    expect(stored?.config_provenance).toEqual({
+      config_version: "v1",
+      interviewer_profile_id: "p1",
+      evaluation_framework_id: "f1-v1",
+      content_source_ids: [],
+      config_hash: "hash-org-1-v1",
+    });
+  });
+
+  it("LEGACY_SESSION_POLICY: /session/end fails closed for a session with no config_provenance.config_version, never guesses a version", async () => {
+    const app = buildApp();
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    // A pre-Phase-6 session: has scenario_id/target_mode but no
+    // config_provenance at all — simulates a legacy Firestore doc.
+    sessionsStore.set("legacy-session-1", {
+      session_id: "legacy-session-1",
+      user_id: "uid-1",
+      organization_id: "org-1",
+      owner_uid: "uid-1",
+      scenario_id: "generic",
+      target_mode: "generic",
+      status: "in_progress",
+      started_at: "2026-01-01T00:00:00.000Z",
+    });
+
+    resolveScenarioConfigForVersionMock.mockClear();
+    const res = await request(app)
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({ session_id: "legacy-session-1", duration_seconds: 30, transcript: [{ role: "user", text: "hola" }] });
+
+    expect(res.status).toBe(503);
+    // Never even attempted to resolve — there is no version to resolve.
+    expect(resolveScenarioConfigForVersionMock).not.toHaveBeenCalled();
+    expect(sessionsStore.get("legacy-session-1")?.status).toBe("evaluation_failed");
+    expect(sessionsStore.get("legacy-session-1")?.failure_reason).toBe("LEGACY_CONFIG_VERSION_UNKNOWN");
+  });
+
+  it("config_version desconocida -> /session/end falla cerrado (never substitutes the active version)", async () => {
+    const app = buildApp();
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    sessionsStore.set("session-unknown-version", {
+      session_id: "session-unknown-version",
+      user_id: "uid-1",
+      organization_id: "org-1",
+      owner_uid: "uid-1",
+      scenario_id: "generic",
+      target_mode: "generic",
+      status: "in_progress",
+      started_at: "2026-01-01T00:00:00.000Z",
+      config_provenance: {
+        config_version: "v-deleted",
+        interviewer_profile_id: "p1",
+        evaluation_framework_id: "f1-v-deleted",
+        content_source_ids: [],
+        config_hash: "hash-gone",
+      },
+    });
+    resolveScenarioConfigForVersionMock.mockImplementationOnce(async () => ({
+      outcome: "unknown_config_version",
+      errors: ["No se pudo leer manifest.json: ENOENT"],
+    }));
+
+    const res = await request(app)
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({
+        session_id: "session-unknown-version",
+        duration_seconds: 30,
+        transcript: [{ role: "user", text: "hola" }],
+      });
+
+    expect(res.status).toBe(503);
+    expect(sessionsStore.get("session-unknown-version")?.status).toBe("evaluation_failed");
+  });
+
+  it("DEPRECATION_FLOW: a version no longer active still resolves for its own historical session", async () => {
+    // Resolution never distinguishes active/deprecated at the routes
+    // layer — the mock simply keeps answering for "v1" regardless of
+    // what's "active" today, exactly like the real resolveScenarioConfigForVersion.
+    const app = buildApp();
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const startRes = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    const sessionId = startRes.body.session_id as string;
+
+    const endRes = await request(app)
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({ session_id: sessionId, duration_seconds: 30, transcript: [{ role: "user", text: "hola" }] });
+
+    expect(endRes.status).toBe(200);
   });
 });

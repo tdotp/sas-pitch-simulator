@@ -1,0 +1,12 @@
+{
+  "id": "press-followup",
+  "name": "Entrevista de seguimiento de prensa (demo, solo v2)",
+  "description": "Escenario de demostración agregado en v2: existe ÚNICAMENTE en esta versión del paquete acme-demo, para probar que una sesión pinneada a v1 nunca puede resolverlo, incluso después de que v2 se active.",
+  "interviewerProfileId": "press-generic",
+  "evaluationFrameworkId": "press-generic-v1",
+  "contentSourceIds": ["acme-facts"],
+  "timing": { "idealSeconds": 60, "maxSeconds": 120 },
+  "firstMessage": "Hola de nuevo. Quiero retomar algo que quedó pendiente de la última conversación.",
+  "openingContext": "OBJETIVO DEL EJERCICIO (demo, solo v2): practicar una repregunta de seguimiento manteniendo consistencia con lo dicho anteriormente.",
+  "closingMessage": "Gracias, con esto cierro el seguimiento."
+}

@@ -1,22 +1,31 @@
-// Loads and validates a client's config package.
+// Loads and validates a client's config package for ONE EXPLICIT version.
 //
-// STORAGE_STRATEGY (Phase 5): reads from local JSON fixture files under
+// STORAGE_STRATEGY (Phase 5, unchanged in Phase 6 — see STORAGE_DECISION
+// in PHASE_06_CONFIG_VERSIONING_PROVENANCE_REPORT.md): reads from local
+// JSON fixture files under
 // backend/config-packages/<organizationId>/<version>/ — but every caller
 // depends only on the `ConfigPackageLoader` interface below, never on the
 // filesystem directly. Swapping this for a Firestore-backed loader later
-// (Phase 6/12) means writing one new class that implements the same
-// interface; nothing in engine-config/resolver.ts or backend/src/engine/*
-// changes. See STORAGE_STRATEGY in PHASE_05_ENGINE_CONFIG_REPORT.md.
+// means writing one new class that implements the same interface;
+// nothing in engine-config/resolver.ts or backend/src/engine/* changes.
+//
+// Phase 6: `loadPackage` now takes `version` EXPLICITLY — there is no
+// "pick the version for me" mode anymore. Which version is authoritative
+// for NEW sessions (the "active" one) is a question for
+// repositories/configVersions.ts's registry, never this file — see
+// ELIMINAR_LA_SELECCIÓN_TEMPORAL_DE_VERSION in the Phase 6 report. This
+// loader's only job, for any given (organizationId, version), is:
+// "do these files exist and validate?" — the same job it always had, just
+// without ever guessing WHICH version to check.
 //
 // Two validation passes, both required before a package is usable:
 //   1. STRUCTURAL (Zod): does each JSON file match its schema?
 //   2. SEMANTIC (this file): do cross-references resolve? Any duplicate
 //      ids? Does the manifest match what's actually on disk?
-// A package failing either pass is unusable — resolveScenarioConfig()
-// (resolver.ts) never returns a partially-valid result.
+// A package failing either pass is unusable — resolver.ts never returns a
+// partially-valid result.
 
 import { readFile, readdir } from "node:fs/promises";
-import type { Dirent } from "node:fs";
 import { join } from "node:path";
 import {
   ManifestSchema,
@@ -27,20 +36,22 @@ import {
   ContentSourceSchema,
   type ConfigPackage,
 } from "./schema.js";
+import { computeConfigHash } from "./configHash.js";
 
 export type ConfigPackageResult =
-  | { valid: true; pkg: ConfigPackage }
+  | { valid: true; pkg: ConfigPackage; hash: string }
   | { valid: false; errors: string[] };
 
 export interface ConfigPackageLoader {
   /**
    * Loads and fully validates (structural + semantic) the config package
-   * for one organization. Returns `valid: false` with human-readable
-   * errors instead of throwing — a missing/invalid package is an
-   * ordinary, expected outcome (e.g. an org with no config yet), not a
-   * crash.
+   * for one organization AT ONE EXPLICIT VERSION. Returns `valid: false`
+   * with human-readable errors instead of throwing — a missing/invalid
+   * package (or an unknown version) is an ordinary, expected outcome
+   * (e.g. an org with no config yet, or a version id that was never
+   * published), not a crash.
    */
-  loadPackage(organizationId: string): Promise<ConfigPackageResult>;
+  loadPackage(organizationId: string, version: string): Promise<ConfigPackageResult>;
 }
 
 const DEFAULT_ROOT = new URL("../../config-packages/", import.meta.url);
@@ -63,44 +74,29 @@ async function readJsonDir(dir: string): Promise<Array<{ file: string; data: unk
   );
 }
 
-// Picks the package version to load for an organization. Phase 5 keeps
-// this deliberately trivial (the only "active" version directory found) —
-// real version selection (pinning, provenance per session) is Phase 6.
-//
-// TEMPORARY_VERSION_SELECTION (PASS_WITH_FIXES item 7, tracked in
-// PHASE_05_ENGINE_CONFIG_REPORT.md): `entries.sort().reverse()` below is a
-// placeholder, not real semver/version resolution — it happens to put
-// "v2" before "v1" lexicographically, but has no notion of a session
-// pinning to the version it started with, no deprecation handling beyond
-// Manifest.status, and breaks on non-lexicographic version names (e.g.
-// "v9" vs "v10"). This must NOT survive Phase 6's real versioning design;
-// do not build anything else on top of this sort order.
-async function pickVersionDir(orgDir: string): Promise<string | null> {
-  let entries: string[];
+// Discovery ONLY — never authority. Used exclusively by tooling (the
+// config:validate/import CLIs, and one-off bootstrap scripts) to list
+// what version directories exist on disk for a human/operator to choose
+// from. NEVER consulted by resolver.ts or routes.ts to decide which
+// version serves a request — that would silently reintroduce the exact
+// "pick by directory sort" anti-pattern Phase 6 removes. See
+// ELIMINAR_LA_SELECCIÓN_TEMPORAL_DE_VERSION in the Phase 6 report.
+export async function listVersionDirs(organizationId: string, root: URL = DEFAULT_ROOT): Promise<string[]> {
+  const orgDir = new URL(`${organizationId}/`, root);
   try {
-    const dirents: Dirent[] = await readdir(orgDir, { withFileTypes: true });
-    entries = dirents.filter((e) => e.isDirectory()).map((e) => e.name);
+    const dirents = await readdir(orgDir.pathname, { withFileTypes: true });
+    return dirents.filter((e) => e.isDirectory()).map((e) => e.name).sort();
   } catch {
-    return null;
+    return [];
   }
-  // Prefer a directory literally named by semantic-ish version, sorted
-  // descending so "v2" beats "v1" if both exist. Phase 5 fixtures only
-  // ever have one.
-  entries.sort().reverse();
-  return entries[0] ?? null;
 }
 
 export class FileConfigPackageLoader implements ConfigPackageLoader {
   constructor(private readonly root: URL = DEFAULT_ROOT) {}
 
-  async loadPackage(organizationId: string): Promise<ConfigPackageResult> {
+  async loadPackage(organizationId: string, version: string): Promise<ConfigPackageResult> {
     const errors: string[] = [];
     const orgDir = new URL(`${organizationId}/`, this.root);
-
-    const version = await pickVersionDir(orgDir.pathname);
-    if (!version) {
-      return { valid: false, errors: [`No existe config package para organizationId="${organizationId}"`] };
-    }
     const versionDir = new URL(`${version}/`, orgDir).pathname;
 
     // ── manifest.json (structural) ──
@@ -120,6 +116,9 @@ export class FileConfigPackageLoader implements ConfigPackageLoader {
       errors.push(
         `manifest.organizationId ("${manifest.organizationId}") no coincide con la carpeta ("${organizationId}")`
       );
+    }
+    if (manifest.version !== version) {
+      errors.push(`manifest.version ("${manifest.version}") no coincide con la versión solicitada ("${version}")`);
     }
 
     // ── client.json (structural) ──
@@ -197,10 +196,8 @@ export class FileConfigPackageLoader implements ConfigPackageLoader {
       return { valid: false, errors: semanticErrors };
     }
 
-    return {
-      valid: true,
-      pkg: { manifest, client, interviewerProfiles, scenarios, evaluationFrameworks, contentSources },
-    };
+    const pkg: ConfigPackage = { manifest, client, interviewerProfiles, scenarios, evaluationFrameworks, contentSources };
+    return { valid: true, pkg, hash: computeConfigHash(pkg) };
   }
 }
 

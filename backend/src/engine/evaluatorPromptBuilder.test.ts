@@ -10,7 +10,7 @@ import {
 } from "./evaluatorPromptBuilder.js";
 import type { ResolvedScenarioConfig } from "../engine-config/schema.js";
 import { FileConfigPackageLoader } from "../engine-config/loader.js";
-import { resolveScenarioConfig } from "../engine-config/resolver.js";
+import { resolveScenarioConfigForVersion } from "../engine-config/resolver.js";
 
 function resolvedWithFramework(
   organizationId: string,
@@ -19,6 +19,8 @@ function resolvedWithFramework(
 ): ResolvedScenarioConfig {
   return {
     organizationId,
+    configVersion: "v1",
+    configHash: "fake-hash",
     client: { organizationId, defaultLanguage: "es", settings: {} },
     scenario: {
       id: "s1",
@@ -197,7 +199,10 @@ describe("PASS_WITH_FIXES: generic detected_requirements contract", () => {
 
   it("acme-demo's real config package produces no 'mentioned_sas' and no literal SAS text anywhere in the built prompts", async () => {
     const loader = new FileConfigPackageLoader();
-    const resolved = await resolveScenarioConfig({ organizationId: "acme-demo", scenarioId: "generic" }, loader);
+    const resolved = await resolveScenarioConfigForVersion(
+      { organizationId: "acme-demo", scenarioId: "generic", configVersion: "v1" },
+      { loader }
+    );
     expect(resolved.outcome).toBe("resolved");
     if (resolved.outcome !== "resolved") return;
 

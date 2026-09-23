@@ -80,6 +80,27 @@ export interface SessionRecord {
   // to reflect that Firestore reality, not because a newly created
   // session may omit it.
   organization_id?: string;
+  // Phase 6 — PROVENANCE_MODEL: exactly which config a session used,
+  // pinned at /session/start and never re-derived. `scenario_id` above is
+  // NOT repeated here (it's already the canonical top-level field for the
+  // same session; duplicating it would be exactly the "duplicación
+  // innecesaria" the Phase 6 prompt asked to avoid) — everything else
+  // needed to reproduce/audit which exact config a session ran against
+  // lives here. Absent on sessions created before Phase 6 (see
+  // LEGACY_SESSION_POLICY in PHASE_06_CONFIG_VERSIONING_PROVENANCE_REPORT.md)
+  // — repositories/sessions.ts and routes.ts treat a missing
+  // config_version as "unknown provenance", never a guessed version.
+  config_provenance?: {
+    config_version: string;
+    interviewer_profile_id: string;
+    evaluation_framework_id: string;
+    content_source_ids: string[];
+    // SHA-256 of the resolved package at the moment this session started
+    // — see engine-config/configHash.ts. Lets a later audit detect "the
+    // version id says v1 but the files don't match what v1 looked like
+    // when this session ran" (IMMUTABILITY_POLICY).
+    config_hash: string;
+  };
   // Phase 4: when status is evaluation_failed or persistence_failed, a
   // short, safe, human-readable reason — never a stack trace, never a
   // secret (API keys, tokens). Truncated at write time; see

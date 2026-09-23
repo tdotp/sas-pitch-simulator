@@ -19,6 +19,8 @@ const { getSignedUrl, buildOverrides } = await import("./elevenlabs.js");
 function resolvedFor(organizationId: string, voiceSlot: "male" | "female" | "random" = "random") {
   return {
     organizationId,
+    configVersion: "v1",
+    configHash: "fake-hash",
     client: { organizationId, defaultLanguage: "es", settings: {} },
     scenario: {
       id: "s1",

@@ -229,6 +229,15 @@ export type ClientConfig = z.infer<typeof ClientConfigSchema>;
 // The package's entry point — what version this is and what it claims
 // to contain. The loader cross-checks this against what it actually
 // found on disk (see MANIFEST_COMPLETENESS in loader.ts).
+//
+// CONTENT_PACKAGE_STATUS (Phase 6): `status` below is kept for backward
+// structural compatibility and as human-readable intent inside the
+// package itself, but it is NOT the authority for which version serves
+// live traffic — that's `repositories/configVersions.ts`'s registry
+// (Firestore, or its in-memory dev fallback), the ONE place
+// draft/active/deprecated is decided. See CONTENT_PACKAGE_STATUS in
+// PHASE_06_CONFIG_VERSIONING_PROVENANCE_REPORT.md for why two
+// independent "active" flags would be a contradiction waiting to happen.
 
 export const ManifestSchema = z.object({
   organizationId: IdSchema,
@@ -252,16 +261,47 @@ export interface ConfigPackage {
   contentSources: ContentSource[];
 }
 
-// What resolveScenarioConfig() returns — the ONLY shape the engine
-// (elevenlabs.ts, evaluator.ts) is allowed to consume. Everything the
-// engine needs for one training session, already looked up and
-// cross-referenced; no further lookups, no client name, no scenario
-// branching required downstream.
+// What resolveScenarioConfigForNewSession/ForVersion() (resolver.ts)
+// return — the ONLY shape the engine (elevenlabs.ts, evaluator.ts) is
+// allowed to consume. Everything the engine needs for one training
+// session, already looked up and cross-referenced; no further lookups, no
+// client name, no scenario branching required downstream.
+//
+// Phase 6: gains `configVersion`/`configHash` so nothing downstream needs
+// a SEPARATE lookup to know which exact version/content it's running —
+// routes.ts reads these straight off the resolved config to build
+// SessionRecord.config_provenance (see PROVENANCE_MODEL in
+// PHASE_06_CONFIG_VERSIONING_PROVENANCE_REPORT.md).
 export interface ResolvedScenarioConfig {
   organizationId: string;
+  configVersion: string;
+  configHash: string;
   client: ClientConfig;
   scenario: Scenario;
   interviewerProfile: InterviewerProfile;
   evaluationFramework: EvaluationFramework;
   contentSources: ContentSource[];
+}
+
+// ── ConfigPackageVersion (Phase 6) ─────────────────────────────────
+// The version REGISTRY's record shape — repositories/configVersions.ts
+// is the sole authority that reads/writes this; nothing infers it from
+// directory listings, file mtimes, or manifest.status (see
+// CONTENT_PACKAGE_STATUS above).
+
+export const ConfigVersionStatusSchema = z.enum(["draft", "active", "deprecated"]);
+export type ConfigVersionStatus = z.infer<typeof ConfigVersionStatusSchema>;
+
+export interface ConfigPackageVersion {
+  organizationId: string;
+  version: string;
+  status: ConfigVersionStatus;
+  createdAt: string;
+  activatedAt?: string;
+  deprecatedAt?: string;
+  // Recorded on first activation (see configHash.ts) — a later activation
+  // of the SAME version whose freshly computed hash doesn't match this is
+  // rejected as an IMMUTABILITY_POLICY violation (repositories/
+  // configVersions.ts's activateConfigVersion).
+  configHash?: string;
 }

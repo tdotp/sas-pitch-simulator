@@ -1,0 +1,17 @@
+{
+  "id": "press-generic-v1",
+  "name": "Rúbrica de entrevista de prensa (demo)",
+  "maxScore": 100,
+  "criteria": [
+    { "id": "clarity", "name": "Claridad", "weight": 40, "description": "El mensaje es claro y va al punto." },
+    { "id": "evidence", "name": "Evidencia", "weight": 30, "description": "Incluye al menos un dato verificable." },
+    { "id": "composure", "name": "Serenidad", "weight": 30, "description": "Mantiene compostura ante preguntas directas." }
+  ],
+  "observableRules": ["incluye al menos un dato verificable", "no evade la repregunta"],
+  "requirements": [
+    { "id": "verifiable_data", "description": "Incluye al menos un dato verificable durante la entrevista." }
+  ],
+  "mustReward": [],
+  "mustPenalize": [],
+  "evaluationInstructions": "Framework de demostración (v2) — evalúa solo lo descrito en los criterios, sin ningún contexto adicional específico de industria. Esta instrucción difiere deliberadamente de v1, como prueba de contenido real distinto entre versiones (ver CONTENT_HASH_DECISION en PHASE_06_CONFIG_VERSIONING_PROVENANCE_REPORT.md)."
+}

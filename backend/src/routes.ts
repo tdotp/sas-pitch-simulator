@@ -19,7 +19,10 @@ import { getSignedUrl } from "./services/elevenlabs.js";
 import { computeMetrics } from "./services/metrics.js";
 import { evaluatePitch, EvaluationError } from "./services/evaluator.js";
 import { isAuthReady } from "./firebase.js";
-import { resolveScenarioConfig } from "./engine-config/resolver.js";
+import {
+  resolveScenarioConfigForNewSession,
+  resolveScenarioConfigForVersion,
+} from "./engine-config/resolver.js";
 import type { ResolvedScenarioConfig } from "./engine-config/schema.js";
 import {
   createSession,
@@ -74,7 +77,7 @@ router.use(requireToken, limiter);
 // scenario it's starting. `target_mode` is a DEPRECATED wire-compat
 // field name (see StartSessionRequest in types.ts) — its value is
 // treated purely as a scenarioId to resolve within the caller's own
-// organization via resolveScenarioConfig(). There is no
+// organization via resolveScenarioConfigForNewSession(). There is no
 // `if (scenarioId === "davivienda")` anywhere in this file, and nothing
 // here knows what "davivienda" or "sas-colombia" mean.
 router.post(
@@ -98,7 +101,7 @@ router.post(
     const auth = req.auth!;
     const context = req.appContext!;
 
-    const scenarioResult = await resolveScenarioConfig({
+    const scenarioResult = await resolveScenarioConfigForNewSession({
       organizationId: context.organizationId,
       scenarioId,
     });
@@ -141,6 +144,16 @@ router.post(
       status: "in_progress",
       started_at: new Date().toISOString(),
       owner_uid: auth.uid,
+      // PROVENANCE_MODEL (Phase 6): pinned once, here, at creation — never
+      // re-derived. /session/end resolves against THIS, not against
+      // "whatever is active" (see SESSION_PINNING).
+      config_provenance: {
+        config_version: resolved.configVersion,
+        interviewer_profile_id: resolved.interviewerProfile.id,
+        evaluation_framework_id: resolved.evaluationFramework.id,
+        content_source_ids: resolved.contentSources.map((c) => c.id),
+        config_hash: resolved.configHash,
+      },
     };
 
     try {
@@ -260,22 +273,40 @@ router.post(
     }
 
     // claim.outcome === "claimed": we now exclusively hold "evaluating".
-    // Re-resolve the SAME scenario config used at /session/start, keyed
-    // only by what's persisted on the session (organization_id +
-    // scenario_id) — never anything from this request's body. This is
-    // what lets evaluatePitch stay config-driven without /session/end
-    // needing to re-derive or trust a scenario from the client.
+    //
+    // SESSION_PINNING (Phase 6, CRITICAL): resolve the EXACT config
+    // version this session was pinned to at /session/start
+    // (config_provenance.config_version) — NEVER "whatever is active
+    // right now". A config version activated between /session/start and
+    // this call must have zero effect on this session. See
+    // SESSION_END_FLOW in PHASE_06_CONFIG_VERSIONING_PROVENANCE_REPORT.md.
+    const configVersion = claim.session.config_provenance?.config_version;
+    if (!configVersion) {
+      // LEGACY_SESSION_POLICY: a session created before Phase 6 (or any
+      // session somehow missing its pinned version) has no known
+      // provenance — never guess/substitute a version for it. Fail
+      // closed; this is a distinct, explicit policy, not an oversight.
+      console.error(
+        `[/session/end] session=${session_id} no tiene config_provenance.config_version ` +
+          `(sesión legacy pre-Fase-6 o provenance ausente) — fail-closed, no se adivina versión.`
+      );
+      await markEvaluationFailed(session_id, "LEGACY_CONFIG_VERSION_UNKNOWN").catch(() => {});
+      return res.status(503).json({
+        error: "Esta sesión no tiene una versión de configuración registrada y no puede evaluarse.",
+      });
+    }
     const scenarioId = claim.session.scenario_id ?? claim.session.target_mode;
-    const scenarioResult = await resolveScenarioConfig({
+    const scenarioResult = await resolveScenarioConfigForVersion({
       organizationId: claim.session.organization_id!,
       scenarioId,
+      configVersion,
     });
     if (scenarioResult.outcome !== "resolved") {
       console.error(
         `[/session/end] no se pudo re-resolver la config para session=${session_id} ` +
-          `org=${claim.session.organization_id} scenario=${scenarioId}: ${scenarioResult.outcome}`
+          `org=${claim.session.organization_id} scenario=${scenarioId} config_version=${configVersion}: ${scenarioResult.outcome}`
       );
-      await markEvaluationFailed(session_id, "CONFIG_RESOLUTION_FAILED").catch(() => {});
+      await markEvaluationFailed(session_id, "CONFIG_VERSION_RESOLUTION_FAILED").catch(() => {});
       return res.status(503).json({ error: "No se pudo evaluar la sesión. Intenta de nuevo más tarde." });
     }
     const resolved: ResolvedScenarioConfig = scenarioResult.config;

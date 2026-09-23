@@ -1,0 +1,12 @@
+{
+  "id": "generic",
+  "name": "Entrevista de prensa general (demo)",
+  "description": "Escenario de demostración: prueba que el mismo engine ejecuta un scenarioId \"generic\" con contenido completamente distinto al de sas-colombia — sin colisionar, porque la resolución siempre está scoped por organizationId.",
+  "interviewerProfileId": "press-generic",
+  "evaluationFrameworkId": "press-generic-v1",
+  "contentSourceIds": ["acme-facts"],
+  "timing": { "idealSeconds": 60, "maxSeconds": 120 },
+  "firstMessage": "Hola, gracias por el tiempo. Cuéntame en tus palabras qué está haciendo Acme Demo Co diferente este año.",
+  "openingContext": "OBJETIVO DEL EJERCICIO (demo): quien practica debe dar una declaración clara de 60 segundos con al menos un dato verificable, manteniendo la compostura ante una repregunta directa.",
+  "closingMessage": "Gracias por el tiempo, con esto tengo suficiente para mi nota."
+}
