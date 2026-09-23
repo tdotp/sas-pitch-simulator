@@ -316,11 +316,11 @@ scenarios: 1
 interviewers: 1
 frameworks: 1
 contentSources: 1
-configHash: aad1518c...
+configHash: 9a1530b49ebd67f9e7559aff07007fb7367df27bcf583ad783f150192fee5b65
 validation: PASS
 ```
 
-(salida real, capturada corriendo la herramienta contra `backend/config-packages/acme-demo/v1` — ver TEST_RESULTS). `--dry-run` no llama a `registerDraftVersion` ni a `activateConfigVersion` bajo ninguna condición — la rama de escritura está DESPUÉS del `if (dryRun) { ...; process.exit(0); }` en el código fuente, no gateada por una condición que pueda evaluarse mal.
+(salida real, capturada corriendo la herramienta contra `backend/config-packages/acme-demo/v1` — ver TEST_RESULTS. Hash actualizado en el `PASS_WITH_FIXES_ADDENDUM` tras excluir `manifest.status` del cálculo — ver CONTENT_HASH_DECISION.) `--dry-run` no llama a `registerDraftVersion` ni a `activateConfigVersion` bajo ninguna condición — la rama de escritura está DESPUÉS del `if (dryRun) { ...; process.exit(0); }` en el código fuente, no gateada por una condición que pueda evaluarse mal.
 
 ---
 
@@ -328,9 +328,12 @@ validation: PASS
 
 **Implementado, no dejado como P2.** `engine-config/configHash.ts`: `computeConfigHash(pkg)` = SHA-256 de `canonicalJSON(pkg)`, donde `canonicalJSON` ordena recursivamente las keys de cada objeto (para que el orden de escritura en el `.json` fuente nunca cambie el hash) y preserva el orden de los arrays (el loader ya lee directorios en orden determinista por nombre de archivo — `readJsonDir`'s `.sort()` — así que el orden de arrays también es estable y, además, semánticamente significativo: el orden de `criteria` importa). Se hashea el paquete YA VALIDADO Y PARSEADO por Zod (con defaults aplicados), nunca los bytes crudos del archivo — así reformatear un `.json` (espacios, orden de keys) nunca cambia el hash, solo un cambio de contenido real lo hace.
 
+**`manifest.status` EXCLUIDO del hash canónico (decisión explícita, ver PASS_WITH_FIXES_ADDENDUM más abajo).**
+
 Usos concretos, no solo un campo decorativo:
 1. **IMMUTABILITY_POLICY**: rechaza reactivar una versión cuyo contenido cambió desde su primera activación.
 2. **PROVENANCE_MODEL**: cada sesión guarda el hash de la config exacta que usó (`config_provenance.config_hash`), auditable independientemente del texto plano de los archivos.
+3. **CONFIG HASH COMO PRECONDICIÓN REAL** (agregado en el `PASS_WITH_FIXES_ADDENDUM`): `/session/start` y `/session/end` comparan el hash resuelto contra el hash registrado/pinneado — ya no basta con que el NOMBRE de versión resuelva.
 
 **Explícitamente NO es sustituto del version id** — sigue siendo `config_version` (no el hash) lo que se resuelve, se pinnea y aparece en logs/URLs; el hash es evidencia de integridad debajo de ese id, no el identificador en sí.
 
@@ -436,7 +439,7 @@ configHash: f7e2d8e812b7745463665e65d67ef82777d50d533f103add8d53314059640395
 validation: PASS
 ```
 
-(Hashes distintos entre v1/v2, confirmando que el content hash captura el cambio real de contenido — no solo la etiqueta de versión.)
+(Hashes distintos entre v1/v2, confirmando que el content hash captura el cambio real de contenido — no solo la etiqueta de versión. **Estos valores de hash específicos cambiaron en el `PASS_WITH_FIXES_ADDENDUM` de abajo** al excluir `manifest.status` del cálculo — el resto de esta sección, incluidos los conteos de tests, es la instantánea de la entrega original de Fase 6, antes del fix.)
 
 **`config:import`/`config:activate` NO se corrieron contra Firestore real en esta sesión** — ver KNOWN_LIMITATIONS/OPEN_ITEMS: el proyecto tiene credenciales reales configuradas (`FIREBASE_SERVICE_ACCOUNT_PATH` apunta a un service account real de `smartpr-pitch-agent`), y escribir ahí sin pedir autorización explícita habría sido una acción con efecto en un sistema compartido — se evitó deliberadamente. Su lógica SÍ está completamente cubierta por `configVersions.test.ts` (11 tests, sin Firestore real, vía el fallback en memoria) — los scripts CLI son wrappers delgados sobre esas mismas funciones ya probadas.
 
@@ -444,7 +447,7 @@ validation: PASS
 
 ## KNOWN_LIMITATIONS
 
-- **No hay enforcement de inmutabilidad en cada resolución**, solo en (re)activación — un archivo editado en sitio DESPUÉS de activarse, sin que nadie vuelva a llamar `activateConfigVersion`, no se detecta hasta la próxima activación. Un chequeo de hash en cada `resolveScenarioConfigForVersion`/`ForNewSession` (con un `console.warn`, no un fail-closed) quedaría como mejora natural de Fase 7+ si el volumen lo justifica.
+- ~~No hay enforcement de inmutabilidad en cada resolución, solo en (re)activación~~ — **corregido en el `PASS_WITH_FIXES_ADDENDUM` de abajo**: `/session/start` y `/session/end` ahora comparan el hash resuelto contra el hash registrado/pinneado en cada resolución, no solo en activación. Ver VERSION_PINNING_PLUS_HASH_ENFORCEMENT.
 - **`manifest.status` sigue siendo un campo válido pero inerte** — no se eliminó del schema (habría sido tocar el núcleo de `schema.ts` innecesariamente para un campo ya opcional/inofensivo), pero un operador que lo edite esperando que gobierne algo se llevará una sorpresa. Documentado explícitamente (CONTENT_PACKAGE_STATUS) en vez de dejarlo como trampa silenciosa.
 - **No se implementó ningún mecanismo de "no borrar una versión deprecated con sesiones que la referencian"** de forma activa — no existe ninguna operación de borrado de versión en todo el sistema todavía, así que no hay nada que enforcear contra eso hoy. Si Fase 7+ agrega un "delete version", esa operación deberá consultar sesiones antes de proceder.
 - **El template `VOCERIA_CLIENT_CONTENT_TEMPLATE.zip` no menciona `requirements[]`** (ver HUMAN_TEMPLATE_TO_CONFIG_MAPPING) — compatible pero desalineado; actualizar el ZIP queda pendiente, consciente, fuera de esta sesión.
@@ -472,9 +475,126 @@ validation: PASS
 - [ ] Fase 10: migración de sesiones legacy (incluidas las que ahora caen bajo LEGACY_CONFIG_VERSION_UNKNOWN además de las ~68 previas).
 - [ ] Fase 12: UI de gestión de config (draft/QA/activate) sobre las mismas funciones (`activateConfigVersion`, etc.) que el CLI ya expone — sin rediseño de arquitectura.
 - [ ] Onboarding real de Novo: usar el flujo `CONTENT_INTEGRATION_CONTRACT` documentado aquí con contenido real, produciendo `novo/v1` — la meta explícita de esta fase era dejar el flujo listo, no ejecutarlo con contenido real todavía.
-- [ ] Evaluar drift-detection de hash en cada resolución (no solo en activación) si el volumen de organizaciones/versiones lo justifica — ver KNOWN_LIMITATIONS.
+- [x] ~~Evaluar drift-detection de hash en cada resolución (no solo en activación)~~ — hecho en el `PASS_WITH_FIXES_ADDENDUM` de abajo, no quedó pendiente.
 
 ---
 
 **Commit de código de esta fase:** `15c5476e896acb629bd3eca64d9f6bba20d1b93a`
 **Este reporte:** commiteado por separado, después del código.
+
+---
+
+## PASS_WITH_FIXES_ADDENDUM
+
+**Veredicto de revisión:** `PASS_WITH_FIXES`. Arquitectura general aprobada — version registry, storage híbrido, CLI, lifecycle sin rehacer. **Un único fix estructural obligatorio: el content hash tenía que ser una precondición real, no solo un dato guardado.** No se avanzó a Fase 7. No se tocó Firestore real.
+**Commit del fix (código):** `5a60fd3176a03a1a2f23008a2f7e43a8c28dd09a`
+
+### VERSION_PINNING_PLUS_HASH_ENFORCEMENT
+
+**`version pinning + hash enforcement = exact content provenance.`**
+
+Pinnear una sesión al NOMBRE de una versión (`config_version: "v1"`) sin verificar que el CONTENIDO de esa versión siga siendo el mismo deja un hueco: `v1` es un identificador estable por diseño (nunca cambia), pero nada impedía que sus archivos cambiaran por debajo de ese nombre entre el inicio y el fin de una sesión, o entre dos sesiones distintas que ambas creen estar usando "v1". La entrega original de esta fase guardaba `config_hash` en la provenance pero nunca lo comparaba contra nada — era un dato de auditoría pasivo, no una precondición. Con este fix:
+
+- **`/session/end`** ya no confía en que el `config_version` resuelto correctamente implique contenido correcto — compara explícitamente `resolved.configHash` contra `claim.session.config_provenance.config_hash` (el hash grabado en el momento exacto en que la sesión empezó) ANTES de tocar el evaluador.
+- **`/session/start`** ya no confía en que el registry diga "v1 is active" sin verificar que "v1" en disco siga siendo lo que el registry registró — compara el hash grabado en la activación contra el hash recién calculado de los archivos reales.
+- Juntas, estas dos comparaciones cierran el hueco: un `config_version` nunca vuelve a ser suficiente por sí solo — su CONTENIDO exacto (el hash) es ahora parte de la precondición de resolución en ambos extremos del ciclo de vida de una sesión. Esto es lo que "exact content provenance" significa concretamente en este sistema: no solo "qué versión", sino "qué versión, con qué contenido exacto, verificado en el momento del uso".
+
+### 1. `/session/end` — CONFIG_PROVENANCE_HASH_MISMATCH
+
+`routes.ts`, inmediatamente después de que `resolveScenarioConfigForVersion` devuelve `resolved`, antes de `computeMetrics`/`evaluatePitch`:
+
+```ts
+if (resolved.configHash !== provenance.config_hash) {
+  await markEvaluationFailed(session_id, "CONFIG_PROVENANCE_HASH_MISMATCH").catch(() => {});
+  return res.status(503).json({ error: "No se pudo evaluar la sesión. Intenta de nuevo más tarde." });
+}
+```
+
+- **Fail closed**: `evaluatePitch` nunca se llama en este camino — el `return` ocurre antes.
+- **`failure_reason` seguro**: `"CONFIG_PROVENANCE_HASH_MISMATCH"` es una categoría fija, nunca el hash real ni ninguna ruta de archivo — coherente con el resto de `FAILURE_REASON_TAXONOMY` (Fase 4).
+- **Nunca re-pinnea ni sustituye el hash**: `markEvaluationFailed` solo escribe `status`/`failure_reason` (ver `repositories/sessions.ts`, sin cambios) — `config_provenance` de la sesión queda exactamente como se escribió en `/session/start`, para siempre. La provenance persistida es la autoridad histórica, tal como pidió la revisión — nunca se actualiza para "coincidir" con lo que se encontró después.
+- **Respuesta externa genérica**: el cliente recibe el mismo 503 genérico que cualquier otro fallo de evaluación — el detalle (`pinned=... resolved=...`) va solo a `console.error`.
+
+### 2. `/session/start` — CONFIG_INTEGRITY_DRIFT
+
+La comparación vive en `resolveScenarioConfigForNewSession` (`engine-config/resolver.ts`), no en `routes.ts` — es una cuestión de consistencia interna del propio resolver (¿coinciden el registry y el filesystem?), no algo específico de una sesión.
+
+**Cambio de interfaz, deliberadamente pequeño** (opción explícitamente permitida por la revisión: "una lectura adicional coherente"): `ConfigVersionRegistry` gana un segundo método,
+
+```ts
+export interface ConfigVersionRegistry {
+  resolveActiveVersion(organizationId: string): Promise<string | null>;
+  getVersion(organizationId: string, version: string): Promise<{ configHash?: string } | null>;
+}
+```
+
+implementado por el registry real reusando la función `getVersion` que `repositories/configVersions.ts` YA exponía desde la entrega original de esta fase (no fue necesario escribir lógica de lectura nueva, solo cablear lo que ya existía). Con eso:
+
+```ts
+const activeRecord = await registry.getVersion(params.organizationId, activeVersion);
+if (activeRecord?.configHash && activeRecord.configHash !== result.hash) {
+  return {
+    outcome: "no_config_for_organization",
+    errors: [`CONFIG_INTEGRITY_DRIFT: ...`],
+  };
+}
+```
+
+- **Fail closed**: ninguna sesión nueva se crea; `routes.ts` responde 503 exactamente como ya respondía para cualquier otro `no_config_for_organization` (sin outcome nuevo — reutilizar el existente mantiene el diseño pequeño, tal como pidió la revisión).
+- **Reporte interno vs. externo**: el mensaje `CONFIG_INTEGRITY_DRIFT: ...` (con ambos hashes, para debugging) va a `errors[]`, que `routes.ts` ya logueaba con `console.error` sin exponerlo al cliente — cero cambio necesario en `routes.ts` para que esto quede oculto del cliente; ya era el comportamiento para `no_config_for_organization`.
+
+### 3. `manifest.status` / hash — decisión tomada
+
+**Se excluyó `manifest.status` del hash canónico.** `engine-config/configHash.ts` gana `stripInertManifestFields(pkg)`, que quita `status` del objeto `manifest` antes de canonicalizar — el resto de `manifest` (organizationId, version, las listas de ids) se mantiene en el hash.
+
+**Por qué:** `manifest.status` ya era, desde la entrega original de esta fase, un campo declarado no-autoritativo (ver CONTENT_PACKAGE_STATUS) — la única autoridad sobre draft/active/deprecated es el registry. Un hash pensado para detectar drift de CONTENIDO (`IMMUTABILITY_POLICY`) no debe dispararse por un campo que no cambia nada de lo que una sesión realmente experimenta: pasar `manifest.status` de `"active"` a `"deprecated"` no cambia un solo prompt, criterio, playbook ni content source. Si ese campo participara del hash, alguien podría (razonablemente) esperar que editarlo sea inofensivo — y en cambio dispararía un falso positivo de `IMMUTABILITY_POLICY`/`CONFIG_INTEGRITY_DRIFT` sin que nada real hubiera cambiado.
+
+**Verificado, no solo argumentado:** se flipeó `manifest.status` de `"active"` a `"deprecated"` en el archivo real `backend/config-packages/acme-demo/v1/manifest.json`, se corrió `config:validate` (hash idéntico: `9a1530b4...` en ambos casos), y se restauró el archivo original antes de continuar (`git diff` confirma cero cambios netos en ese archivo).
+
+Consecuencia práctica: **los valores de hash reportados en la entrega original de esta fase (`aad1518c...`, `f7e2d8e8...`) ya no son los que produce el código actual** — no porque el contenido haya cambiado, sino porque `status` dejó de contar. Los valores actuales quedan documentados en TEST_RESULTS (sección original) actualizados abajo.
+
+### 4. Tests nuevos (6, todos verdes)
+
+**`engine-config/resolver.test.ts` (+2, ahora 12):**
+- `CONFIG_DRIFT_DETECTION`: el registry recuerda un hash ("AAA") distinto del que el loader calcula ahora mismo para los archivos reales de la versión active → `resolveScenarioConfigForNewSession` devuelve `no_config_for_organization`, nunca `resolved`.
+- Caso de control (sin drift): el hash recordado coincide con el hash actual → resuelve normalmente, sin falsos positivos.
+
+**`routes.test.ts` (+4, ahora 219 en el proyecto), nuevo `describe("CONFIG HASH AS A REAL PRECONDITION")`:**
+1. Sesión empieza en v1/hash `hash-org-1-v1`; el mock de `/session/end` simula que v1 ahora hashea a `hash-BBB-mutated-in-place` → 503, `evaluatePitchMock` NUNCA llamado (aserción explícita `not.toHaveBeenCalled()`), `failure_reason === "CONFIG_PROVENANCE_HASH_MISMATCH"`, y `config_provenance` de la sesión permanece exactamente igual a como se escribió en `/session/start` (nunca re-pinneado).
+2. El mock de `/session/start` simula el outcome que la función real produce ante drift (`no_config_for_organization`) → 503 genérico, sin fuga del detalle interno (`CONFIG_INTEGRITY_DRIFT`) en el body de la respuesta.
+3. Caso de control: active v1 sin drift → `/session/start` responde 200 normalmente.
+4. Repetición del mismatch con un hash distinto → confirma otra vez que la provenance persistida (`config_provenance`) nunca se sobreescribe con el hash recién resuelto, sea cual sea.
+
+(El caso #4 pedido — "deprecated v1 cuyo hash coincide con la provenance → historical /session/end funciona" — ya estaba cubierto por el test `DEPRECATION_FLOW` existente, fortalecido con un comentario explícito de que su formula de hash por defecto también ejercita el caso sin-drift; y a nivel de función pura por `resolveScenarioConfigForVersion`'s tests de deprecation en `resolver.test.ts`, sin cambios en esta ronda.)
+
+Los 213 tests previos de Fases 1–6 (entrega original) se mantienen verdes sin cambiar sus expectativas.
+
+### Resultados
+
+```
+$ npm test
+backend:  Test Files  17 passed (17) | Tests  219 passed (219)
+frontend: Test Files   2 passed (2)  | Tests    8 passed (8)
+```
+
+(219 = 213 de la entrega original de Fase 6 + 6 nuevas: 2 en `engine-config/resolver.test.ts` + 4 en `routes.test.ts`.)
+
+```
+$ npm run build
+backend:  tsc -p tsconfig.json  -> sin errores
+frontend: tsc -b && vite build  -> sin errores
+```
+
+**Hashes reales actualizados** (tras excluir `manifest.status`, corridos de verdad vía `config:validate`, sin Firestore):
+
+```
+$ npm run config:validate -- backend/config-packages/acme-demo/v1
+configHash: 9a1530b49ebd67f9e7559aff07007fb7367df27bcf583ad783f150192fee5b65
+validation: PASS
+
+$ npm run config:validate -- backend/config-packages/acme-demo/v2
+configHash: 4a54bf86007e234b72ab01b77e0dc78ea85d6f127aefdf560b6886323a605194
+validation: PASS
+```
+
+**No deploy. No Firestore real. No Fase 7.**
