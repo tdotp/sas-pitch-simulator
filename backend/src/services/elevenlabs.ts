@@ -159,8 +159,24 @@ export async function getSignedUrl(
   }
 
   // Fase 7: a 200 is not automatically a success — the body must actually
-  // contain a usable signed_url.
-  const rawBody: unknown = await res.json();
+  // contain a usable signed_url. PASS_WITH_FIXES P1.1: res.json() itself
+  // throws (SyntaxError) for a 2xx whose body isn't valid JSON at all
+  // (an HTML error page, truncated JSON) — that must be caught here and
+  // classified the same as a schema failure, never left to propagate as
+  // an unclassified error. The raw body is deliberately never read/kept
+  // in this branch (no `.text()` fallback for the message) — it's not
+  // needed and the instruction is explicit: never put it in the public
+  // error.
+  let rawBody: unknown;
+  try {
+    rawBody = await res.json();
+  } catch {
+    logSignedUrlOutcome(start, "failure", "ELEVENLABS_INVALID_RESPONSE");
+    throw new ElevenLabsError(
+      "ElevenLabs signed-url response was not valid JSON",
+      "ELEVENLABS_INVALID_RESPONSE"
+    );
+  }
   const parsed = SignedUrlResponseSchema.safeParse(rawBody);
   if (!parsed.success) {
     logSignedUrlOutcome(start, "failure", "ELEVENLABS_INVALID_RESPONSE");

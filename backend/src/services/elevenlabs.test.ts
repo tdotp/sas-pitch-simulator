@@ -260,6 +260,86 @@ describe("getSignedUrl", () => {
     expect(JSON.stringify(logged)).not.toContain("super-secret-signed-path");
   });
 
+  // PASS_WITH_FIXES P1.1: res.json() throws (SyntaxError) BEFORE reaching
+  // Zod on a 2xx whose body isn't valid JSON at all (HTML error page,
+  // truncated/malformed JSON) — that throw must be caught and classified
+  // the same as a schema failure, not propagate as an unclassified error.
+  it("classifies a 200 with an HTML body as ELEVENLABS_INVALID_RESPONSE, fail-closed", async () => {
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      text: async () => "<html><body>Service Unavailable</body></html>",
+      json: async () => {
+        throw new SyntaxError("Unexpected token '<', \"<html><bod\"... is not valid JSON");
+      },
+    });
+
+    let caught: unknown;
+    try {
+      await getSignedUrl(resolvedFor("org-a"));
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ElevenLabsError);
+    expect((caught as InstanceType<typeof ElevenLabsError>).category).toBe("ELEVENLABS_INVALID_RESPONSE");
+  });
+
+  it("classifies a 200 with malformed JSON as ELEVENLABS_INVALID_RESPONSE, fail-closed", async () => {
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      text: async () => '{"signed_url": "wss://incomplete',
+      json: async () => {
+        throw new SyntaxError("Unexpected end of JSON input");
+      },
+    });
+
+    let caught: unknown;
+    try {
+      await getSignedUrl(resolvedFor("org-a"));
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as InstanceType<typeof ElevenLabsError>).category).toBe("ELEVENLABS_INVALID_RESPONSE");
+  });
+
+  it("never includes the raw body in the public error message for a JSON-parse failure", async () => {
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      text: async () => "<html>super-secret-internal-detail</html>",
+      json: async () => {
+        throw new SyntaxError("Unexpected token '<'");
+      },
+    });
+
+    let caught: unknown;
+    try {
+      await getSignedUrl(resolvedFor("org-a"));
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as InstanceType<typeof ElevenLabsError>).message).not.toContain(
+      "super-secret-internal-detail"
+    );
+  });
+
+  it("logs an elevenlabs_signed_url event with outcome failure and ELEVENLABS_INVALID_RESPONSE for a JSON-parse failure", async () => {
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      text: async () => "<html></html>",
+      json: async () => {
+        throw new SyntaxError("Unexpected token '<'");
+      },
+    });
+
+    await expect(getSignedUrl(resolvedFor("org-a"))).rejects.toThrow();
+
+    expect(logEvent).toHaveBeenCalledTimes(1);
+    expect(logEvent.mock.calls[0][0]).toMatchObject({
+      event: "elevenlabs_signed_url",
+      outcome: "failure",
+      error_category: "ELEVENLABS_INVALID_RESPONSE",
+    });
+  });
+
   it("logs an elevenlabs_signed_url event with outcome failure and the safe error_category on a 500", async () => {
     (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: false,

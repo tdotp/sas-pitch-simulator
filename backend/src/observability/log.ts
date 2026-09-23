@@ -1,12 +1,18 @@
 // Fase 7: structured logging, no external platform (dashboards are Fase 8
 // — see STRUCTURED_LOGGING in PHASE_07_RELIABILITY_PROVIDER_HARDENING_REPORT.md).
 //
-// LogFields is a closed field whitelist, not a convention — a caller that
-// tries to log anything outside it (an API key, an Authorization header, a
-// signed URL, a service account, a full transcript, a raw provider body)
-// gets a TypeScript excess-property error on the object literal at compile
-// time. That's the redaction policy: enforced by the type checker, not by
-// a runtime scrub-by-key-name pass that could be bypassed or forgotten.
+// PASS_WITH_FIXES (P2): LogFields is a typed whitelist, not a guarantee.
+// Passing an object literal with a field outside this interface (an API
+// key, an Authorization header, a signed URL, a service account, a full
+// transcript, a raw provider body) fails TypeScript's excess-property
+// check IF the object is a literal passed directly to logEvent(...) — the
+// pattern every current call site uses. That check is a compiler
+// convenience, not a runtime enforcement: assigning the object to a
+// variable first, an `as LogFields` cast, or spreading from an untyped
+// source all silently bypass it. There is no runtime scrubber in this
+// phase; a future call site that builds its fields dynamically needs its
+// own explicit validation, not an assumption that this interface still
+// protects it.
 export interface LogFields {
   event: string;
   session_id?: string;

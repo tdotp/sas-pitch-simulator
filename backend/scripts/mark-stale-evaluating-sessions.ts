@@ -28,17 +28,35 @@
 
 import { initFirebase, isAuthReady } from "../src/firebase.js";
 import { listEvaluatingSessionsOlderThan, markEvaluationFailed } from "../src/repositories/sessions.js";
+import { parseHours } from "./staleEvaluatingArgs.js";
 
-function parseArgs() {
+// PASS_WITH_FIXES P1.2: --hours is validated BEFORE anything else in
+// main() touches Firebase — an invalid value (negative, zero, NaN,
+// Infinity) exits here, with no Firestore query and no write. See
+// staleEvaluatingArgs.ts for the validation rule and why it matters.
+function parseArgs(): { hours: number; dryRun: boolean } | null {
   const args = process.argv.slice(2);
   const hoursArg = args.find((a) => a.startsWith("--hours="));
-  const hours = hoursArg ? Number(hoursArg.split("=")[1]) : 2;
+  const rawHours = hoursArg ? hoursArg.split("=")[1] : undefined;
+  const parsedHours = parseHours(rawHours);
+  if (!parsedHours.ok) {
+    console.error(`[stale-evaluating-sweep] ${parsedHours.error}`);
+    console.error(
+      "[stale-evaluating-sweep] Uso: mark-stale-evaluating-sessions.ts [--hours=N] [--dry-run]  (N debe ser > 0)"
+    );
+    return null;
+  }
   const dryRun = args.includes("--dry-run");
-  return { hours, dryRun };
+  return { hours: parsedHours.hours, dryRun };
 }
 
 async function main() {
-  const { hours, dryRun } = parseArgs();
+  const parsedArgs = parseArgs();
+  if (!parsedArgs) {
+    process.exit(1);
+    return;
+  }
+  const { hours, dryRun } = parsedArgs;
 
   initFirebase();
   if (!isAuthReady()) {
