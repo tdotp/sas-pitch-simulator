@@ -11,6 +11,7 @@
     "test": "vitest run",
     "bootstrap:phase2-legacy-org": "tsx scripts/bootstrap-phase2-legacy-org.ts",
     "sessions:mark-abandoned": "tsx scripts/mark-abandoned-sessions.ts",
+    "sessions:mark-stale-evaluating": "tsx scripts/mark-stale-evaluating-sessions.ts",
     "config:validate": "tsx scripts/config-validate.ts",
     "config:import": "tsx scripts/config-import.ts",
     "config:activate": "tsx scripts/config-activate.ts"

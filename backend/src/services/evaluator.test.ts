@@ -19,6 +19,12 @@ vi.mock("../engine/evaluatorPromptBuilder.js", () => ({
   buildEvaluatorUserMessage: () => "user message",
 }));
 
+const logEvent = vi.fn();
+vi.mock("../observability/log.js", () => ({
+  logEvent: (...args: unknown[]) => logEvent(...args),
+  elapsedMs: (start: number) => Date.now() - start,
+}));
+
 const { evaluatePitch, EvaluationError } = await import("./evaluator.js");
 
 function jsonResponse(body: unknown, ok = true, status = 200) {
@@ -30,9 +36,68 @@ function jsonResponse(body: unknown, ok = true, status = 200) {
   } as Response;
 }
 
+// Fase 7: a schema-valid, contract-valid LLM response — matches
+// minimalResolved's framework exactly (one criterion "a"/weight 100, no
+// requirements). Any test exercising the "success" path now needs a full
+// shape, not just { overall_score }, since evaluator.ts runs runtime +
+// semantic validation on the raw response before returning it.
+function validLlmContent(overrides: Record<string, unknown> = {}) {
+  return {
+    overall_score: 80,
+    readiness_level: "alto",
+    one_line_diagnosis: "diagnóstico",
+    executive_summary: "resumen",
+    duration: {
+      seconds: 30,
+      formatted: "0:30",
+      ideal_seconds: 90,
+      max_seconds: 180,
+      status: "aceptable",
+      comment: "comentario",
+    },
+    detected_requirements: [],
+    speech_metrics: {
+      word_count: 5,
+      words_per_minute: 100,
+      filler_words_total: 0,
+      top_filler_words: [],
+      repetition_count: 0,
+      top_repetitions: [],
+      long_pauses_count: 0,
+      used_numbers: true,
+      numbers_detected: [],
+      has_cta: true,
+      comment: "comentario",
+    },
+    criteria_scores: [
+      {
+        criterion_id: "a",
+        criterion_name: "A",
+        score: 80,
+        max_score: 100,
+        evidence: "evidencia",
+        comment: "comentario",
+        recommendation: "recomendación",
+      },
+    ],
+    strengths: [],
+    improvement_areas: [],
+    critical_flags: [],
+    missed_opportunities: [],
+    best_line_from_user: "línea",
+    weakest_line_from_user: "línea",
+    recommended_pitch_90_seconds: "pitch",
+    recommended_pitch_45_seconds: "pitch",
+    recommended_cta: "cta",
+    next_training_focus: [],
+    coach_feedback: "feedback",
+    ...overrides,
+  };
+}
+
 function okOpenRouterResponse(overall_score = 80) {
   return jsonResponse({
-    choices: [{ message: { content: JSON.stringify({ overall_score }) } }],
+    choices: [{ message: { content: JSON.stringify(validLlmContent({ overall_score })) } }],
   });
 }
 
@@ -102,6 +167,7 @@ const baseParams = {
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
   vi.useRealTimers();
+  logEvent.mockClear();
 });
 
 describe("evaluatePitch", () => {
@@ -129,13 +195,14 @@ describe("evaluatePitch", () => {
         choices: [
           {
             message: {
-              content: JSON.stringify({
-                overall_score: 80,
-                detected_requirements: [
-                  { id: "mentioned_sas", detected: true, evidence: "cita 1" },
-                  { id: "aligned_to_playbook", detected: false, evidence: "" },
-                ],
-              }),
+              content: JSON.stringify(
+                validLlmContent({
+                  detected_requirements: [
+                    { id: "mentioned_sas", detected: true, evidence: "cita 1" },
+                    { id: "aligned_to_playbook", detected: false, evidence: "" },
+                  ],
+                })
+              ),
             },
           },
         ],
@@ -150,26 +217,37 @@ describe("evaluatePitch", () => {
     ]);
   });
 
-  it("gives an empty description (never fabricated) for an id the model returns that isn't in the framework's requirements", async () => {
+  // Fase 7: an id the model returns that isn't declared by the pinned
+  // framework used to be silently accepted with an empty description.
+  // Semantic contract validation now rejects it outright — see
+  // OPENROUTER_INVALID_EVALUATION_CONTRACT in evaluatorSchema.ts.
+  it("rejects a detected_requirements id that isn't declared by the framework (contract violation)", async () => {
     (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
       jsonResponse({
         choices: [
           {
             message: {
-              content: JSON.stringify({
-                overall_score: 80,
-                detected_requirements: [{ id: "unexpected_id", detected: true, evidence: "x" }],
-              }),
+              content: JSON.stringify(
+                validLlmContent({
+                  detected_requirements: [{ id: "unexpected_id", detected: true, evidence: "x" }],
+                })
+              ),
             },
           },
         ],
       })
     );
 
-    const result = await evaluatePitch(baseParams); // minimalResolved has requirements: []
-    expect(result.detected_requirements).toEqual([
-      { id: "unexpected_id", detected: true, evidence: "x", description: "" },
-    ]);
+    let caught: unknown;
+    try {
+      await evaluatePitch(baseParams); // minimalResolved has requirements: []
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(EvaluationError);
+    expect((caught as InstanceType<typeof EvaluationError>).category).toBe(
+      "OPENROUTER_INVALID_EVALUATION_CONTRACT"
+    );
   });
 
   it("retries once on a transient 503, then succeeds", async () => {
@@ -346,5 +424,149 @@ describe("evaluatePitch", () => {
 
     expect(result.overall_score).toBe(70);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  // Fase 7: runtime schema validation (evaluatorSchema.ts).
+  it("classifies a shape-valid JSON that fails the response schema as OPENROUTER_INVALID_RESPONSE_SCHEMA, and does NOT retry", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        choices: [{ message: { content: JSON.stringify({ overall_score: 80 }) } }],
+      })
+    );
+
+    let caught: unknown;
+    try {
+      await evaluatePitch(baseParams);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(EvaluationError);
+    expect((caught as InstanceType<typeof EvaluationError>).category).toBe(
+      "OPENROUTER_INVALID_RESPONSE_SCHEMA"
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // Fase 7: semantic contract validation (evaluatorSchema.ts) against the
+  // PINNED EvaluationFramework — an unknown criterion_id is rejected, not
+  // silently dropped or averaged in.
+  it("classifies an unknown criterion_id as OPENROUTER_INVALID_EVALUATION_CONTRACT, and does NOT retry", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify(
+                validLlmContent({
+                  criteria_scores: [
+                    {
+                      criterion_id: "not_in_framework",
+                      criterion_name: "?",
+                      score: 10,
+                      max_score: 100,
+                      evidence: "e",
+                      comment: "c",
+                      recommendation: "r",
+                    },
+                  ],
+                })
+              ),
+            },
+          },
+        ],
+      })
+    );
+
+    let caught: unknown;
+    try {
+      await evaluatePitch(baseParams);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(EvaluationError);
+    expect((caught as InstanceType<typeof EvaluationError>).category).toBe(
+      "OPENROUTER_INVALID_EVALUATION_CONTRACT"
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("classifies a criterion max_score that doesn't match the framework's weight as OPENROUTER_INVALID_EVALUATION_CONTRACT", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify(
+                validLlmContent({
+                  criteria_scores: [
+                    {
+                      criterion_id: "a",
+                      criterion_name: "A",
+                      score: 10,
+                      max_score: 50, // framework's criterion "a" has weight 100
+                      evidence: "e",
+                      comment: "c",
+                      recommendation: "r",
+                    },
+                  ],
+                })
+              ),
+            },
+          },
+        ],
+      })
+    );
+
+    let caught: unknown;
+    try {
+      await evaluatePitch(baseParams);
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as InstanceType<typeof EvaluationError>).category).toBe(
+      "OPENROUTER_INVALID_EVALUATION_CONTRACT"
+    );
+  });
+
+  // Fase 7: structured logging (observability/log.ts).
+  it("logs an openrouter_attempt event with outcome success and a duration_ms", async () => {
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(okOpenRouterResponse(75));
+    await evaluatePitch(baseParams);
+
+    const attemptLog = logEvent.mock.calls
+      .map((call) => call[0])
+      .find((f) => f.event === "openrouter_attempt");
+    expect(attemptLog).toMatchObject({
+      provider: "openrouter",
+      outcome: "success",
+      session_id: "s1",
+      attempt: 1,
+    });
+    expect(typeof attemptLog.duration_ms).toBe("number");
+  });
+
+  it("logs an openrouter_attempt event with outcome failure and the safe error_category on a 503, once per attempt", async () => {
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ error: "boom" }, false, 503))
+      .mockResolvedValueOnce(okOpenRouterResponse(90));
+    await evaluatePitch(baseParams);
+
+    const attemptLogs = logEvent.mock.calls.map((call) => call[0]).filter((f) => f.event === "openrouter_attempt");
+    expect(attemptLogs).toHaveLength(2);
+    expect(attemptLogs[0]).toMatchObject({ outcome: "failure", error_category: "OPENROUTER_5XX", attempt: 1 });
+    expect(attemptLogs[1]).toMatchObject({ outcome: "success", attempt: 2 });
+  });
+
+  it("logs an evaluation_total event with the overall duration_ms after a successful evaluation", async () => {
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(okOpenRouterResponse(75));
+    await evaluatePitch(baseParams);
+
+    const totalLog = logEvent.mock.calls.map((call) => call[0]).find((f) => f.event === "evaluation_total");
+    expect(totalLog).toMatchObject({ session_id: "s1", outcome: "success" });
+    expect(typeof totalLog.duration_ms).toBe("number");
   });
 });

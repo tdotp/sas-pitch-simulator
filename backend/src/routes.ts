@@ -33,8 +33,28 @@ import {
   getSessionById,
   listSessionsByOrganization,
 } from "./repositories/sessions.js";
+import { logEvent, elapsedMs } from "./observability/log.js";
 
 export const router = Router();
+
+// Fase 7 — FIRESTORE_FAILURE_POLICY: markEvaluationFailed on these
+// fail-closed paths is deliberately best-effort (the caller already
+// committed to a 503/502 response either way, whether or not this write
+// lands) — but "best-effort" must never mean the failure vanishes with no
+// trace. Every call site below routes through this instead of its own
+// `.catch(() => {})`.
+async function markEvaluationFailedLogged(
+  sessionId: string,
+  reason: string
+): Promise<Awaited<ReturnType<typeof markEvaluationFailed>> | null> {
+  return markEvaluationFailed(sessionId, reason).catch((markErr: unknown) => {
+    console.error(
+      `[/session/end] markEvaluationFailed también falló (session=${sessionId}, reason=${reason}):`,
+      (markErr as Error).message
+    );
+    return null;
+  });
+}
 
 router.get("/health", (_req: Request, res: Response) => {
   res.json({
@@ -163,7 +183,18 @@ router.post(
       // can possibly call /session/end. This is the one Firestore write
       // on the critical path in the whole app, by design — it's a single
       // small document write, not a page load.
+      const writeStart = Date.now();
       await createSession(session);
+      logEvent({
+        event: "firestore_write",
+        provider: "firestore",
+        session_id: session.session_id,
+        organization_id: session.organization_id,
+        config_version: resolved.configVersion,
+        scenario_id: resolved.scenario.id,
+        duration_ms: elapsedMs(writeStart),
+        outcome: "success",
+      });
     } catch (err) {
       console.error("[/session/start] createSession falló:", (err as Error).message);
       return res.status(503).json({ error: "No se pudo guardar tu sesión. Intenta de nuevo." });
@@ -226,14 +257,31 @@ router.post(
       : 0;
 
     let claim: Awaited<ReturnType<typeof claimSessionForEvaluation>>;
+    const claimStart = Date.now();
     try {
       claim = await claimSessionForEvaluation({
         sessionId: session_id,
         ownerUid: req.auth!.uid,
         organizationId: req.appContext!.organizationId,
       });
+      logEvent({
+        event: "firestore_write",
+        provider: "firestore",
+        session_id,
+        organization_id: req.appContext!.organizationId,
+        duration_ms: elapsedMs(claimStart),
+        outcome: "success",
+      });
     } catch (err) {
       console.error("[/session/end] claimSessionForEvaluation falló:", (err as Error).message);
+      logEvent({
+        event: "firestore_write",
+        provider: "firestore",
+        session_id,
+        organization_id: req.appContext!.organizationId,
+        duration_ms: elapsedMs(claimStart),
+        outcome: "failure",
+      });
       return res.status(503).json({ error: "No se pudo verificar la sesión. Intenta de nuevo." });
     }
 
@@ -290,7 +338,7 @@ router.post(
         `[/session/end] session=${session_id} no tiene config_provenance.config_version ` +
           `(sesión legacy pre-Fase-6 o provenance ausente) — fail-closed, no se adivina versión.`
       );
-      await markEvaluationFailed(session_id, "LEGACY_CONFIG_VERSION_UNKNOWN").catch(() => {});
+      await markEvaluationFailedLogged(session_id, "LEGACY_CONFIG_VERSION_UNKNOWN");
       return res.status(503).json({
         error: "Esta sesión no tiene una versión de configuración registrada y no puede evaluarse.",
       });
@@ -306,7 +354,7 @@ router.post(
         `[/session/end] no se pudo re-resolver la config para session=${session_id} ` +
           `org=${claim.session.organization_id} scenario=${scenarioId} config_version=${provenance.config_version}: ${scenarioResult.outcome}`
       );
-      await markEvaluationFailed(session_id, "CONFIG_VERSION_RESOLUTION_FAILED").catch(() => {});
+      await markEvaluationFailedLogged(session_id, "CONFIG_VERSION_RESOLUTION_FAILED");
       return res.status(503).json({ error: "No se pudo evaluar la sesión. Intenta de nuevo más tarde." });
     }
     const resolved: ResolvedScenarioConfig = scenarioResult.config;
@@ -328,7 +376,7 @@ router.post(
           `pinned=${provenance.config_hash} resolved=${resolved.configHash} — el contenido de esta versión ` +
           `cambió después de que la sesión inició.`
       );
-      await markEvaluationFailed(session_id, "CONFIG_PROVENANCE_HASH_MISMATCH").catch(() => {});
+      await markEvaluationFailedLogged(session_id, "CONFIG_PROVENANCE_HASH_MISMATCH");
       return res.status(503).json({ error: "No se pudo evaluar la sesión. Intenta de nuevo más tarde." });
     }
 
@@ -352,16 +400,11 @@ router.post(
       // PHASE_04_SESSION_LIFECYCLE_REPORT.md.
       const category = err instanceof EvaluationError ? err.category : "OPENROUTER_UNKNOWN_ERROR";
       console.error("[/session/end] evaluatePitch falló:", (err as Error).message);
-      const marked = await markEvaluationFailed(session_id, category).catch((markErr: unknown) => {
-        // The session is stuck in "evaluating" if even this fails — same
-        // class of recoverable-but-stuck state as an abandoned session;
-        // see KNOWN_LIMITATIONS in PHASE_04_SESSION_LIFECYCLE_REPORT.md.
-        console.error(
-          "[/session/end] markEvaluationFailed también falló:",
-          (markErr as Error).message
-        );
-        return null;
-      });
+      // The session is stuck in "evaluating" if even this fails — same
+      // class of recoverable-but-stuck state as an abandoned session; see
+      // KNOWN_LIMITATIONS in PHASE_04_SESSION_LIFECYCLE_REPORT.md, and now
+      // STALE_EVALUATING_POLICY in PHASE_07_RELIABILITY_PROVIDER_HARDENING_REPORT.md.
+      const marked = await markEvaluationFailedLogged(session_id, category);
       if (marked && !marked.applied) {
         console.warn(
           `[/session/end] markEvaluationFailed no se aplicó para ${session_id} ` +
@@ -371,12 +414,23 @@ router.post(
       return res.status(502).json({ error: "No se pudo evaluar la sesión. Intenta de nuevo más tarde." });
     }
 
+    const persistStart = Date.now();
     try {
       const persisted = await persistCompletedResult(session_id, {
         duration_seconds: duration,
         transcript,
         metrics,
         evaluation,
+      });
+      logEvent({
+        event: "firestore_write",
+        provider: "firestore",
+        session_id,
+        organization_id: claim.session.organization_id,
+        config_version: resolved.configVersion,
+        scenario_id: resolved.scenario.id,
+        duration_ms: elapsedMs(persistStart),
+        outcome: persisted.applied ? "success" : "failure",
       });
       if (!persisted.applied) {
         // The transactional guard refused the write because the session
@@ -399,6 +453,16 @@ router.post(
       // the original write DID succeed: recover and return the real
       // persisted result instead of lying to the client about a failure.
       console.error("[/session/end] persistCompletedResult falló:", (err as Error).message);
+      logEvent({
+        event: "firestore_write",
+        provider: "firestore",
+        session_id,
+        organization_id: claim.session.organization_id,
+        config_version: resolved.configVersion,
+        scenario_id: resolved.scenario.id,
+        duration_ms: elapsedMs(persistStart),
+        outcome: "failure",
+      });
       const marked = await markPersistenceFailed(session_id, "FIRESTORE_WRITE_FAILED").catch(
         (markErr: unknown) => {
           console.error(

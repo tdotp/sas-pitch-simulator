@@ -18,6 +18,7 @@ import {
   markPersistenceFailed,
   persistCompletedResult,
   markAbandoned,
+  listEvaluatingSessionsOlderThan,
 } from "./sessions.js";
 import type { SessionRecord } from "../types.js";
 
@@ -448,5 +449,57 @@ describe("PASS_WITH_FIXES: guarded exits from evaluating (compare-and-set)", () 
   it("reports currentStatus: null for a session that doesn't exist at all", async () => {
     const result = await markEvaluationFailed("does-not-exist", "OPENROUTER_TIMEOUT");
     expect(result).toEqual({ applied: false, currentStatus: null });
+  });
+});
+
+// Fase 7: STALE_EVALUATING_POLICY — the read side of the stale-evaluating
+// recovery sweep (scripts/mark-stale-evaluating-sessions.ts). Backdates
+// `updated_at` via fake system time rather than passing it directly, since
+// createSession always stamps updated_at with the CURRENT time (both the
+// Firestore and in-memory paths) — see repositories/sessions.ts.
+describe("listEvaluatingSessionsOlderThan", () => {
+  it("returns an evaluating session whose updated_at (claim time) is older than the cutoff", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const s = newSession();
+    await createSession(s);
+    await claimSessionForEvaluation({ sessionId: s.session_id, ownerUid: "uid-1", organizationId: "org-1" });
+
+    vi.setSystemTime(new Date("2026-01-01T10:00:00.000Z")); // 10h later
+    const cutoff = new Date("2026-01-01T05:00:00.000Z").toISOString(); // 5h cutoff
+    const stale = await listEvaluatingSessionsOlderThan(cutoff);
+    vi.useRealTimers();
+
+    expect(stale.map((r) => r.session_id)).toContain(s.session_id);
+  });
+
+  it("excludes an evaluating session claimed more recently than the cutoff", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const s = newSession();
+    await createSession(s);
+
+    vi.setSystemTime(new Date("2026-01-01T04:00:00.000Z")); // claimed at 04:00
+    await claimSessionForEvaluation({ sessionId: s.session_id, ownerUid: "uid-1", organizationId: "org-1" });
+
+    const cutoff = new Date("2026-01-01T03:00:00.000Z").toISOString(); // sweep threshold: 03:00
+    const stale = await listEvaluatingSessionsOlderThan(cutoff);
+    vi.useRealTimers();
+
+    expect(stale.map((r) => r.session_id)).not.toContain(s.session_id);
+  });
+
+  it("excludes an in_progress session even if it's old (that's the abandonment sweep's job, not this one)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const s = newSession(); // stays in_progress, never claimed
+    await createSession(s);
+
+    vi.setSystemTime(new Date("2026-01-01T10:00:00.000Z"));
+    const cutoff = new Date("2026-01-01T05:00:00.000Z").toISOString();
+    const stale = await listEvaluatingSessionsOlderThan(cutoff);
+    vi.useRealTimers();
+
+    expect(stale.map((r) => r.session_id)).not.toContain(s.session_id);
   });
 });

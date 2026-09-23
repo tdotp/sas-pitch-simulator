@@ -16,6 +16,8 @@ import {
   buildEvaluatorSystemPrompt,
   buildEvaluatorUserMessage,
 } from "../engine/evaluatorPromptBuilder.js";
+import { LlmEvaluationResponseSchema, validateEvaluationContract } from "./evaluatorSchema.js";
+import { logEvent, elapsedMs } from "../observability/log.js";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -45,6 +47,15 @@ export type EvaluationFailureCategory =
   | "OPENROUTER_4XX"
   | "OPENROUTER_EMPTY_RESPONSE"
   | "OPENROUTER_INVALID_JSON"
+  // Fase 7: JSON.parse succeeded but the shape doesn't match
+  // LlmEvaluationResponseSchema (evaluatorSchema.ts) — missing/mistyped
+  // fields. Structural, framework-agnostic.
+  | "OPENROUTER_INVALID_RESPONSE_SCHEMA"
+  // Fase 7: shape is valid but it doesn't match the PINNED
+  // EvaluationFramework — unknown/missing/duplicate criterion or
+  // requirement id, or a score/max_score outside its allowed range. See
+  // validateEvaluationContract in evaluatorSchema.ts.
+  | "OPENROUTER_INVALID_EVALUATION_CONTRACT"
   | "OPENROUTER_UNKNOWN_ERROR";
 
 function categoryForStatus(status: number): EvaluationFailureCategory {
@@ -152,9 +163,9 @@ async function attemptEvaluation(
     throw new EvaluationError("OpenRouter returned empty content", false, "OPENROUTER_EMPTY_RESPONSE");
   }
 
-  let parsed: EvaluationResult;
+  let rawJson: unknown;
   try {
-    parsed = JSON.parse(extractJson(content)) as EvaluationResult;
+    rawJson = JSON.parse(extractJson(content));
   } catch (err) {
     throw new EvaluationError(
       `No se pudo parsear el JSON del evaluador: ${(err as Error).message}`,
@@ -163,8 +174,30 @@ async function attemptEvaluation(
     );
   }
 
-  parsed.session_id = sessionId;
-  parsed.target_mode = scenarioId; // deprecated wire-compat mirror, see types.ts
+  // Fase 7: structural runtime validation — replaces the old blind
+  // `as EvaluationResult` cast. Framework-agnostic (same schema for every
+  // client); semantic validation against the PINNED framework happens
+  // separately in evaluatePitch, which is the caller that actually has the
+  // resolved framework in scope.
+  const schemaResult = LlmEvaluationResponseSchema.safeParse(rawJson);
+  if (!schemaResult.success) {
+    throw new EvaluationError(
+      `OpenRouter response failed schema validation: ${schemaResult.error.message}`,
+      false, // not transient — retrying won't change how the model shapes its output
+      "OPENROUTER_INVALID_RESPONSE_SCHEMA"
+    );
+  }
+
+  // detected_requirements deliberately lacks `description` at this point
+  // (the schema never asks the model for one) — enrichDetectedRequirements
+  // attaches it from the framework right after this returns. The cast
+  // reflects that intentional, momentary gap, not a loosely-typed escape
+  // hatch: every other field here is exactly what the schema validated.
+  const parsed: EvaluationResult = {
+    ...schemaResult.data,
+    session_id: sessionId,
+    target_mode: scenarioId, // deprecated wire-compat mirror, see types.ts
+  } as EvaluationResult;
   return parsed;
 }
 
@@ -231,23 +264,98 @@ export async function evaluatePitch(params: {
     metrics: params.metrics,
   });
 
+  // Fase 7: LATENCY_MEASUREMENT — totalStart covers every attempt + retry
+  // backoff + validation; each attempt is measured separately below so a
+  // slow OpenRouter call and a slow retry backoff are distinguishable in
+  // the logs. `correlation` is the same {session_id, organization_id,
+  // config_version, scenario_id} block on every log line for this
+  // evaluation — see STRUCTURED_LOGGING in
+  // PHASE_07_RELIABILITY_PROVIDER_HARDENING_REPORT.md.
+  const totalStart = Date.now();
   let lastError: EvaluationError | null = null;
+  const correlation = {
+    session_id: params.sessionId,
+    organization_id: params.resolved.organizationId,
+    config_version: params.resolved.configVersion,
+    scenario_id: params.resolved.scenario.id,
+  };
+
   for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {
+    const attemptStart = Date.now();
+    let result: EvaluationResult;
     try {
-      const result = await attemptEvaluation(systemPrompt, userMessage, params.resolved.scenario.id, params.sessionId);
-      return enrichDetectedRequirements(result, params.resolved.evaluationFramework.requirements);
+      result = await attemptEvaluation(systemPrompt, userMessage, params.resolved.scenario.id, params.sessionId);
     } catch (err) {
       const evalErr =
         err instanceof EvaluationError
           ? err
           : new EvaluationError((err as Error).message, false, "OPENROUTER_UNKNOWN_ERROR");
+      logEvent({
+        event: "openrouter_attempt",
+        ...correlation,
+        provider: "openrouter",
+        attempt: attempt + 1,
+        duration_ms: elapsedMs(attemptStart),
+        outcome: "failure",
+        error_category: evalErr.category,
+      });
       lastError = evalErr;
       if (evalErr.transient && attempt < MAX_TRANSIENT_RETRIES) {
         await sleep(RETRY_BACKOFF_MS);
         continue;
       }
+      logEvent({
+        event: "evaluation_total",
+        ...correlation,
+        provider: "openrouter",
+        duration_ms: elapsedMs(totalStart),
+        outcome: "failure",
+        error_category: evalErr.category,
+      });
       throw evalErr;
     }
+
+    logEvent({
+      event: "openrouter_attempt",
+      ...correlation,
+      provider: "openrouter",
+      attempt: attempt + 1,
+      duration_ms: elapsedMs(attemptStart),
+      outcome: "success",
+    });
+
+    // Fase 7: semantic contract validation against the PINNED framework —
+    // criteria/requirements coverage and score ranges. The HTTP attempt
+    // itself already succeeded (logged above); a contract violation is a
+    // separate, non-transient failure of the OVERALL evaluation, never
+    // retried.
+    const violations = validateEvaluationContract(result, params.resolved.evaluationFramework);
+    if (violations.length > 0) {
+      const contractErr = new EvaluationError(
+        `OpenRouter evaluation failed contract validation: ${violations.join("; ")}`,
+        false, // not transient — retrying won't change how the model scores it
+        "OPENROUTER_INVALID_EVALUATION_CONTRACT"
+      );
+      logEvent({
+        event: "evaluation_total",
+        ...correlation,
+        provider: "openrouter",
+        duration_ms: elapsedMs(totalStart),
+        outcome: "failure",
+        error_category: contractErr.category,
+      });
+      throw contractErr;
+    }
+
+    const enriched = enrichDetectedRequirements(result, params.resolved.evaluationFramework.requirements);
+    logEvent({
+      event: "evaluation_total",
+      ...correlation,
+      provider: "openrouter",
+      duration_ms: elapsedMs(totalStart),
+      outcome: "success",
+    });
+    return enriched;
   }
   // Unreachable (the loop always returns or throws), but keeps TS happy.
   throw lastError ?? new Error("OpenRouter evaluation failed");

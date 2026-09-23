@@ -464,3 +464,25 @@ export async function listInProgressSessionsOlderThan(cutoffIso: string): Promis
     .map((d) => parseSessionRecord(d.id, d.data()))
     .filter((s): s is SessionRecord => s !== null && (s.started_at ?? "") < cutoffIso);
 }
+
+// Fase 7 — STALE_EVALUATING_POLICY: the read side of the manual recovery
+// sweep for sessions stuck in "evaluating" (provider failure + the
+// failure-state write itself also failing — see KNOWN_LIMITATIONS in
+// PHASE_04_SESSION_LIFECYCLE_REPORT.md). Same shape as
+// listInProgressSessionsOlderThan above, but keyed on `updated_at`
+// (stamped at the exact moment claimSessionForEvaluation's transaction
+// flips status -> "evaluating", see above) rather than `started_at` — no
+// new timestamp field needed. Same single-equality-filter reasoning: no
+// composite index required. Used only by
+// scripts/mark-stale-evaluating-sessions.ts.
+export async function listEvaluatingSessionsOlderThan(cutoffIso: string): Promise<SessionRecord[]> {
+  if (!isPersistenceEnabled()) {
+    return [...memoryStore.values()].filter(
+      (s) => s.status === "evaluating" && (s.updated_at ?? "") < cutoffIso
+    );
+  }
+  const snap = await db().where("status", "==", "evaluating").get();
+  return snap.docs
+    .map((d) => parseSessionRecord(d.id, d.data()))
+    .filter((s): s is SessionRecord => s !== null && (s.updated_at ?? "") < cutoffIso);
+}

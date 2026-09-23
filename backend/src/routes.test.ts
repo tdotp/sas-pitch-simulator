@@ -268,6 +268,15 @@ vi.mock("./repositories/organizations.js", () => ({
   getOrganization: (id: string) => getOrganizationMock(id),
 }));
 
+// Fase 7: structured logging (observability/log.ts) — mocked so tests
+// don't spam real console.log output; a couple of tests below assert on
+// what routes.ts actually logs for the critical Firestore writes.
+const logEventMock = vi.fn();
+vi.mock("./observability/log.js", () => ({
+  logEvent: (...args: unknown[]) => logEventMock(...args),
+  elapsedMs: (start: number) => Date.now() - start,
+}));
+
 const { router } = await import("./routes.js");
 
 function buildApp() {
@@ -286,6 +295,7 @@ beforeEach(() => {
   persistCompletedResultShouldFail = false;
   persistCompletedResultSecretlySucceeds = false;
   evaluatePitchMock.mockReset();
+  logEventMock.mockClear();
   evaluatePitchMock.mockResolvedValue({
     session_id: "evaluated",
     target_mode: "generic",
@@ -1306,6 +1316,28 @@ describe("Phase 6: CONFIG VERSIONING + PROVENANCE", () => {
     });
   });
 
+  // Fase 7: LATENCY_MEASUREMENT for the one Firestore write on the
+  // critical path (createSession) — see the comment above `await
+  // createSession(session)` in routes.ts.
+  it("POST /session/start logs a firestore_write event with duration_ms for createSession", async () => {
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const res = await request(buildApp())
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+
+    expect(res.status).toBe(200);
+    const writeLog = logEventMock.mock.calls
+      .map((call) => call[0])
+      .find((f) => f.event === "firestore_write" && f.outcome === "success");
+    expect(writeLog).toMatchObject({
+      provider: "firestore",
+      organization_id: "org-1",
+      session_id: res.body.session_id,
+    });
+    expect(typeof writeLog.duration_ms).toBe("number");
+  });
+
   it("LEGACY_SESSION_POLICY: /session/end fails closed for a session with no config_provenance.config_version, never guesses a version", async () => {
     const app = buildApp();
     asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
@@ -1333,6 +1365,44 @@ describe("Phase 6: CONFIG VERSIONING + PROVENANCE", () => {
     expect(resolveScenarioConfigForVersionMock).not.toHaveBeenCalled();
     expect(sessionsStore.get("legacy-session-1")?.status).toBe("evaluation_failed");
     expect(sessionsStore.get("legacy-session-1")?.failure_reason).toBe("LEGACY_CONFIG_VERSION_UNKNOWN");
+  });
+
+  // Fase 7: this best-effort markEvaluationFailed call used to be
+  // `.catch(() => {})` — if the write itself also failed, that failure
+  // vanished with no trace anywhere. It must now be logged, same pattern
+  // already used elsewhere in this file for the equivalent case in
+  // /session/end's evaluatePitch failure path.
+  it("logs (never silently swallows) when the best-effort markEvaluationFailed for a legacy session itself fails", async () => {
+    const app = buildApp();
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    sessionsStore.set("legacy-session-2", {
+      session_id: "legacy-session-2",
+      user_id: "uid-1",
+      organization_id: "org-1",
+      owner_uid: "uid-1",
+      scenario_id: "generic",
+      target_mode: "generic",
+      status: "in_progress",
+      started_at: "2026-01-01T00:00:00.000Z",
+    });
+
+    const { markEvaluationFailed } = await import("./repositories/sessions.js");
+    (markEvaluationFailed as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("simulated Firestore write failure")
+    );
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await request(app)
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({ session_id: "legacy-session-2", duration_seconds: 30, transcript: [{ role: "user", text: "hola" }] });
+
+    expect(res.status).toBe(503);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("markEvaluationFailed"),
+      expect.stringContaining("simulated Firestore write failure")
+    );
+    consoleErrorSpy.mockRestore();
   });
 
   it("config_version desconocida -> /session/end falla cerrado (never substitutes the active version)", async () => {

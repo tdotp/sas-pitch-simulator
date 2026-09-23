@@ -9,10 +9,46 @@
 // InterviewerProfile.voice.slot (a generic "male"/"female"/"random" slot,
 // config), never a scenario id.
 
+import { z } from "zod";
 import { config } from "../config.js";
 import type { VoiceGender } from "../types.js";
 import type { ResolvedScenarioConfig } from "../engine-config/schema.js";
 import { buildInterviewerPrompt } from "../engine/promptBuilder.js";
+import { logEvent, elapsedMs } from "../observability/log.js";
+
+// Fase 7: safe, stable, non-sensitive failure categories — mirrors
+// EvaluationFailureCategory's shape in services/evaluator.ts. Never the
+// raw response body/message (which can carry upstream detail): those stay
+// in ElevenLabsError's own `.message`, logged but never persisted.
+export type ElevenLabsFailureCategory =
+  | "ELEVENLABS_TIMEOUT"
+  | "ELEVENLABS_NETWORK_ERROR"
+  | "ELEVENLABS_RATE_LIMITED"
+  | "ELEVENLABS_4XX"
+  | "ELEVENLABS_5XX"
+  | "ELEVENLABS_INVALID_RESPONSE";
+
+export class ElevenLabsError extends Error {
+  category: ElevenLabsFailureCategory;
+  constructor(message: string, category: ElevenLabsFailureCategory) {
+    super(message);
+    this.name = "ElevenLabsError";
+    this.category = category;
+  }
+}
+
+function categoryForStatus(status: number): ElevenLabsFailureCategory {
+  if (status === 429) return "ELEVENLABS_RATE_LIMITED";
+  if (status >= 500) return "ELEVENLABS_5XX";
+  return "ELEVENLABS_4XX";
+}
+
+// Runtime validation of the get-signed-url response body: a 200 with an
+// unexpected/empty body (e.g. `{}`, an HTML error page) is NOT a success —
+// see ELEVENLABS_INVALID_RESPONSE below.
+const SignedUrlResponseSchema = z.object({
+  signed_url: z.string().min(1),
+});
 
 const ELEVEN_BASE = "https://api.elevenlabs.io/v1";
 
@@ -86,6 +122,7 @@ export async function getSignedUrl(
     agentId
   )}`;
 
+  const start = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SIGNED_URL_TIMEOUT_MS);
   let res: Response;
@@ -96,28 +133,67 @@ export async function getSignedUrl(
       headers: { "xi-api-key": config.elevenlabs.apiKey },
     });
   } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`ElevenLabs signed-url request timed out after ${SIGNED_URL_TIMEOUT_MS}ms`);
-    }
-    throw err;
+    const elevenErr =
+      err instanceof Error && err.name === "AbortError"
+        ? new ElevenLabsError(
+            `ElevenLabs signed-url request timed out after ${SIGNED_URL_TIMEOUT_MS}ms`,
+            "ELEVENLABS_TIMEOUT" as const
+          )
+        : new ElevenLabsError(
+            `ElevenLabs signed-url request failed: ${(err as Error).message}`,
+            "ELEVENLABS_NETWORK_ERROR" as const
+          );
+    logSignedUrlOutcome(start, "failure", elevenErr.category);
+    throw elevenErr;
   } finally {
     clearTimeout(timer);
   }
 
   if (!res.ok) {
+    // Raw upstream body stays in `.message` (logged, never persisted or
+    // returned to the client) — never in `.category`.
     const body = await res.text();
-    throw new Error(
-      `ElevenLabs signed-url failed (${res.status}): ${body.slice(0, 300)}`
+    const category = categoryForStatus(res.status);
+    logSignedUrlOutcome(start, "failure", category);
+    throw new ElevenLabsError(`ElevenLabs signed-url failed (${res.status}): ${body.slice(0, 300)}`, category);
+  }
+
+  // Fase 7: a 200 is not automatically a success — the body must actually
+  // contain a usable signed_url.
+  const rawBody: unknown = await res.json();
+  const parsed = SignedUrlResponseSchema.safeParse(rawBody);
+  if (!parsed.success) {
+    logSignedUrlOutcome(start, "failure", "ELEVENLABS_INVALID_RESPONSE");
+    throw new ElevenLabsError(
+      `ElevenLabs signed-url response failed validation: ${parsed.error.message}`,
+      "ELEVENLABS_INVALID_RESPONSE"
     );
   }
 
-  const data = (await res.json()) as { signed_url: string };
+  logSignedUrlOutcome(start, "success");
 
   return {
-    signed_url: data.signed_url,
+    signed_url: parsed.data.signed_url,
     agent_id: agentId,
     voice_id: voiceId,
     voice_gender: gender,
     overrides: buildOverrides(resolved, voiceId),
   };
+}
+
+// Fase 7: LATENCY_MEASUREMENT + STRUCTURED_LOGGING. Deliberately never
+// takes the signed_url or the request/response body — only timing,
+// outcome and a safe category, see LogFields in observability/log.ts.
+function logSignedUrlOutcome(
+  startMs: number,
+  outcome: "success" | "failure",
+  error_category?: ElevenLabsFailureCategory
+): void {
+  logEvent({
+    event: "elevenlabs_signed_url",
+    provider: "elevenlabs",
+    duration_ms: elapsedMs(startMs),
+    outcome,
+    ...(error_category ? { error_category } : {}),
+  });
 }
