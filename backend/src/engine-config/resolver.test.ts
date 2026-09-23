@@ -72,10 +72,23 @@ function fakeLoader(packages: Record<string, ConfigPackage>): ConfigPackageLoade
   };
 }
 
-function fakeRegistry(activeByOrg: Record<string, string | null>): ConfigVersionRegistry {
+// recordedHashesByOrgVersion, keyed `${organizationId}::${version}`: when
+// absent for a given (org, version), getVersion returns null and the
+// resolver's drift check is a no-op (existing tests don't care about
+// hashes) — pass an explicit entry to simulate a real activation-time
+// hash, matching or not, per test.
+function fakeRegistry(
+  activeByOrg: Record<string, string | null>,
+  recordedHashesByOrgVersion: Record<string, string> = {}
+): ConfigVersionRegistry {
   return {
     async resolveActiveVersion(organizationId: string) {
       return activeByOrg[organizationId] ?? null;
+    },
+    async getVersion(organizationId: string, version: string) {
+      const key = `${organizationId}::${version}`;
+      if (!(key in recordedHashesByOrgVersion)) return null;
+      return { configHash: recordedHashesByOrgVersion[key] };
     },
   };
 }
@@ -156,6 +169,33 @@ describe("resolveScenarioConfigForNewSession", () => {
 
     expect(beforeActivation.outcome === "resolved" && beforeActivation.config.configVersion).toBe("v1");
     expect(afterActivation.outcome === "resolved" && afterActivation.config.configVersion).toBe("v2");
+  });
+
+  it("CONFIG_DRIFT_DETECTION: refuses a new session when the active version's files were edited since activation", async () => {
+    const loader = fakeLoader({ "org-a::v1": pkgFor("org-a", "v1", ["generic"]) });
+    // Registry recorded "AAA" when v1 was activated; the loader (i.e. the
+    // files on disk right now) hashes to something else — simulating an
+    // in-place edit after activation, without re-activating.
+    const registry = fakeRegistry({ "org-a": "v1" }, { "org-a::v1": "AAA-stale-hash-from-activation" });
+
+    const result = await resolveScenarioConfigForNewSession(
+      { organizationId: "org-a", scenarioId: "generic" },
+      { loader, registry }
+    );
+    expect(result.outcome).toBe("no_config_for_organization");
+  });
+
+  it("no drift: the registry's recorded hash matching the current file hash resolves normally", async () => {
+    const loader = fakeLoader({ "org-a::v1": pkgFor("org-a", "v1", ["generic"]) });
+    // fakeLoader's hash convention is `fake-hash:${org}:${version}` —
+    // recording exactly that simulates "activation and files agree".
+    const registry = fakeRegistry({ "org-a": "v1" }, { "org-a::v1": "fake-hash:org-a:v1" });
+
+    const result = await resolveScenarioConfigForNewSession(
+      { organizationId: "org-a", scenarioId: "generic" },
+      { loader, registry }
+    );
+    expect(result.outcome).toBe("resolved");
   });
 });
 

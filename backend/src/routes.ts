@@ -280,8 +280,8 @@ router.post(
     // right now". A config version activated between /session/start and
     // this call must have zero effect on this session. See
     // SESSION_END_FLOW in PHASE_06_CONFIG_VERSIONING_PROVENANCE_REPORT.md.
-    const configVersion = claim.session.config_provenance?.config_version;
-    if (!configVersion) {
+    const provenance = claim.session.config_provenance;
+    if (!provenance?.config_version) {
       // LEGACY_SESSION_POLICY: a session created before Phase 6 (or any
       // session somehow missing its pinned version) has no known
       // provenance — never guess/substitute a version for it. Fail
@@ -299,17 +299,39 @@ router.post(
     const scenarioResult = await resolveScenarioConfigForVersion({
       organizationId: claim.session.organization_id!,
       scenarioId,
-      configVersion,
+      configVersion: provenance.config_version,
     });
     if (scenarioResult.outcome !== "resolved") {
       console.error(
         `[/session/end] no se pudo re-resolver la config para session=${session_id} ` +
-          `org=${claim.session.organization_id} scenario=${scenarioId} config_version=${configVersion}: ${scenarioResult.outcome}`
+          `org=${claim.session.organization_id} scenario=${scenarioId} config_version=${provenance.config_version}: ${scenarioResult.outcome}`
       );
       await markEvaluationFailed(session_id, "CONFIG_VERSION_RESOLUTION_FAILED").catch(() => {});
       return res.status(503).json({ error: "No se pudo evaluar la sesión. Intenta de nuevo más tarde." });
     }
     const resolved: ResolvedScenarioConfig = scenarioResult.config;
+
+    // CONFIG HASH AS A REAL PRECONDITION (PASS_WITH_FIXES): the version
+    // NAME resolving successfully isn't enough — its CONTENT must still
+    // be exactly what this session was pinned to. If someone edited
+    // config_version's files in place after /session/start (a direct
+    // IMMUTABILITY_POLICY violation), resolved.configHash here reflects
+    // the CURRENT files, which will differ from what was recorded at
+    // start time. Fail closed: never evaluate against content the
+    // session never actually saw, and never silently re-pin the session
+    // to the new hash — the persisted provenance is the historical
+    // authority, untouched either way.
+    if (resolved.configHash !== provenance.config_hash) {
+      console.error(
+        `[/session/end] CONFIG_PROVENANCE_HASH_MISMATCH para session=${session_id} ` +
+          `org=${claim.session.organization_id} config_version=${provenance.config_version}: ` +
+          `pinned=${provenance.config_hash} resolved=${resolved.configHash} — el contenido de esta versión ` +
+          `cambió después de que la sesión inició.`
+      );
+      await markEvaluationFailed(session_id, "CONFIG_PROVENANCE_HASH_MISMATCH").catch(() => {});
+      return res.status(503).json({ error: "No se pudo evaluar la sesión. Intenta de nuevo más tarde." });
+    }
+
     const target = resolved.scenario.id;
     const metrics = computeMetrics(transcript, duration);
 

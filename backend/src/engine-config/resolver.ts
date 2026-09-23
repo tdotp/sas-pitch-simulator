@@ -29,15 +29,29 @@ import type { ResolvedScenarioConfig } from "./schema.js";
 
 const defaultLoader = new FileConfigPackageLoader();
 
-// Narrow interface so resolver.ts depends only on the two reads it
-// actually needs — tests inject a fake in-memory implementation instead
-// of touching Firestore (or the module-level in-memory fallback, which
+// Narrow interface so resolver.ts depends only on the reads it actually
+// needs — tests inject a fake in-memory implementation instead of
+// touching Firestore (or the module-level in-memory fallback, which
 // would leak state across tests sharing the same organizationId).
+//
+// PASS_WITH_FIXES (config hash as a real precondition): `getVersion` was
+// added here — a "coherent additional read", not a redesign — so
+// resolveScenarioConfigForNewSession can compare the hash the registry
+// recorded at activation time against what's ACTUALLY on disk right now.
+// Without this, a version activated with hash AAA whose files are edited
+// in place to BBB afterward (a direct violation of IMMUTABILITY_POLICY —
+// see the Phase 6 report) would keep silently serving BBB to brand new
+// sessions forever, with nothing in the system ever noticing.
 export interface ConfigVersionRegistry {
   resolveActiveVersion(organizationId: string): Promise<string | null>;
+  getVersion(
+    organizationId: string,
+    version: string
+  ): Promise<{ configHash?: string } | null>;
 }
 const defaultRegistry: ConfigVersionRegistry = {
   resolveActiveVersion: configVersionsRepo.resolveActiveVersion,
+  getVersion: configVersionsRepo.getVersion,
 };
 
 // Precise, DISTINCT return types per function — not one shared union —
@@ -121,6 +135,27 @@ export async function resolveScenarioConfigForNewSession(
   if (!result.valid) {
     return { outcome: "no_config_for_organization", errors: result.errors };
   }
+
+  // CONFIG_DRIFT_DETECTION: the registry's activation-time hash must
+  // still match what's on disk right now. A mismatch means the files for
+  // the ACTIVE version were edited in place after activation — exactly
+  // the IMMUTABILITY_POLICY violation activateConfigVersion() refuses on
+  // re-activation, caught here too so it can't silently start serving
+  // NEW sessions between activations. Fail closed; the client only ever
+  // sees the same generic "no config available" — the specific integrity
+  // reason stays server-side (see routes.ts's console.error).
+  const activeRecord = await registry.getVersion(params.organizationId, activeVersion);
+  if (activeRecord?.configHash && activeRecord.configHash !== result.hash) {
+    return {
+      outcome: "no_config_for_organization",
+      errors: [
+        `CONFIG_INTEGRITY_DRIFT: la versión active "${activeVersion}" de organizationId="${params.organizationId}" ` +
+          `fue registrada con hash "${activeRecord.configHash}" pero los archivos en disco ahora hashean a ` +
+          `"${result.hash}" — contenido modificado en sitio sin re-activar (viola IMMUTABILITY_POLICY).`,
+      ],
+    };
+  }
+
   return assembleConfig(params.organizationId, activeVersion, result.hash, result.pkg, params.scenarioId);
 }
 

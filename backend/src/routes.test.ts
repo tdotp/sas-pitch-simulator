@@ -1373,10 +1373,14 @@ describe("Phase 6: CONFIG VERSIONING + PROVENANCE", () => {
     expect(sessionsStore.get("session-unknown-version")?.status).toBe("evaluation_failed");
   });
 
-  it("DEPRECATION_FLOW: a version no longer active still resolves for its own historical session", async () => {
+  it("DEPRECATION_FLOW: a version no longer active still resolves for its own historical session (hash matches provenance)", async () => {
     // Resolution never distinguishes active/deprecated at the routes
     // layer — the mock simply keeps answering for "v1" regardless of
     // what's "active" today, exactly like the real resolveScenarioConfigForVersion.
+    // The default fixture hash formula is identical for /session/start and
+    // /session/end (both `hash-org-1-v1`), so this also exercises the
+    // NO-DRIFT case of the hash precondition below: deprecated + hash
+    // still matching provenance -> the historical session completes.
     const app = buildApp();
     asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
     const startRes = await request(app)
@@ -1391,5 +1395,121 @@ describe("Phase 6: CONFIG VERSIONING + PROVENANCE", () => {
       .send({ session_id: sessionId, duration_seconds: 30, transcript: [{ role: "user", text: "hola" }] });
 
     expect(endRes.status).toBe(200);
+  });
+
+  // PASS_WITH_FIXES (config hash as a real precondition): version NAME
+  // resolving successfully is not enough — its CONTENT must still be
+  // exactly what the session was pinned to.
+  describe("CONFIG HASH AS A REAL PRECONDITION", () => {
+    it("1. session starts on v1/hash AAA; v1's files change to hash BBB before /session/end -> 503, evaluator never called, provenance never re-pinned", async () => {
+      const app = buildApp();
+      asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+
+      const startRes = await request(app)
+        .post("/api/session/start")
+        .set("Authorization", "Bearer t1")
+        .send({ target_mode: "generic" });
+      const sessionId = startRes.body.session_id as string;
+      expect(sessionsStore.get(sessionId)?.config_provenance).toMatchObject({
+        config_version: "v1",
+        config_hash: "hash-org-1-v1",
+      });
+
+      // Simulates "alguien modifica los archivos de v1 en sitio": the
+      // SAME config_version now resolves with a DIFFERENT content hash.
+      resolveScenarioConfigForVersionMock.mockImplementationOnce(
+        async ({
+          organizationId,
+          scenarioId,
+          configVersion,
+        }: {
+          organizationId: string;
+          scenarioId: string;
+          configVersion: string;
+        }) => ({
+          outcome: "resolved",
+          config: { ...fixtureResolvedScenario(organizationId, scenarioId, configVersion), configHash: "hash-BBB-mutated-in-place" },
+        })
+      );
+      evaluatePitchMock.mockClear();
+
+      const endRes = await request(app)
+        .post("/api/session/end")
+        .set("Authorization", "Bearer t1")
+        .send({ session_id: sessionId, duration_seconds: 30, transcript: [{ role: "user", text: "hola" }] });
+
+      expect(endRes.status).toBe(503);
+      expect(evaluatePitchMock).not.toHaveBeenCalled();
+      const after = sessionsStore.get(sessionId);
+      expect(after?.status).toBe("evaluation_failed");
+      expect(after?.failure_reason).toBe("CONFIG_PROVENANCE_HASH_MISMATCH");
+      // Never silently re-pinned/substituted:
+      expect(after?.config_provenance).toMatchObject({ config_hash: "hash-org-1-v1" });
+    });
+
+    it("2. active registry says v1/hash AAA but the loaded package now hashes to BBB -> new /session/start is rejected (503, generic)", async () => {
+      // At the routes layer, this drift check lives INSIDE
+      // resolveScenarioConfigForNewSession (see engine-config/
+      // resolver.test.ts's CONFIG_DRIFT_DETECTION tests for the real
+      // function) — simulated here at the mock boundary by having it
+      // return the SAME outcome the real function returns on drift.
+      resolveScenarioConfigForNewSessionMock.mockImplementationOnce(async () => ({
+        outcome: "no_config_for_organization",
+        errors: ["CONFIG_INTEGRITY_DRIFT: registered hash AAA, current hash BBB"],
+      }));
+      asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+      const res = await request(buildApp())
+        .post("/api/session/start")
+        .set("Authorization", "Bearer t1")
+        .send({ target_mode: "generic" });
+
+      expect(res.status).toBe(503);
+      expect(JSON.stringify(res.body)).not.toContain("CONFIG_INTEGRITY_DRIFT");
+    });
+
+    it("3. active v1 with no drift -> /session/start works normally", async () => {
+      asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+      const res = await request(buildApp())
+        .post("/api/session/start")
+        .set("Authorization", "Bearer t1")
+        .send({ target_mode: "generic" });
+      expect(res.status).toBe(200);
+    });
+
+    it("5. same config_version, different hash -> never silently re-pinned or substituted (repeat with a different mismatch amount, same guarantee)", async () => {
+      const app = buildApp();
+      asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+      const startRes = await request(app)
+        .post("/api/session/start")
+        .set("Authorization", "Bearer t1")
+        .send({ target_mode: "generic" });
+      const sessionId = startRes.body.session_id as string;
+      const provenanceBefore = sessionsStore.get(sessionId)?.config_provenance;
+
+      resolveScenarioConfigForVersionMock.mockImplementationOnce(
+        async ({
+          organizationId,
+          scenarioId,
+          configVersion,
+        }: {
+          organizationId: string;
+          scenarioId: string;
+          configVersion: string;
+        }) => ({
+          outcome: "resolved",
+          config: { ...fixtureResolvedScenario(organizationId, scenarioId, configVersion), configHash: "yet-another-different-hash" },
+        })
+      );
+
+      await request(app)
+        .post("/api/session/end")
+        .set("Authorization", "Bearer t1")
+        .send({ session_id: sessionId, duration_seconds: 30, transcript: [{ role: "user", text: "hola" }] });
+
+      // The persisted provenance is the historical authority — a failed
+      // hash check must never overwrite it with the (mismatched) newly
+      // resolved hash.
+      expect(sessionsStore.get(sessionId)?.config_provenance).toEqual(provenanceBefore);
+    });
   });
 });
