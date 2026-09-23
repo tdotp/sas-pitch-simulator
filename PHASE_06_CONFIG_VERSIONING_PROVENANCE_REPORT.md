@@ -517,6 +517,8 @@ if (resolved.configHash !== provenance.config_hash) {
 
 ### 2. `/session/start` — CONFIG_INTEGRITY_DRIFT
 
+*(Descripción de la ronda 1 de este fix. La revisión encontró un hueco de fail-open en esta misma verificación — ver la sección "Ronda 2" al final de este addendum para el fix definitivo; el fragmento de código de abajo es el de la ronda 1 y ya NO es el que corre hoy.)*
+
 La comparación vive en `resolveScenarioConfigForNewSession` (`engine-config/resolver.ts`), no en `routes.ts` — es una cuestión de consistencia interna del propio resolver (¿coinciden el registry y el filesystem?), no algo específico de una sesión.
 
 **Cambio de interfaz, deliberadamente pequeño** (opción explícitamente permitida por la revisión: "una lectura adicional coherente"): `ConfigVersionRegistry` gana un segundo método,
@@ -595,6 +597,64 @@ validation: PASS
 $ npm run config:validate -- backend/config-packages/acme-demo/v2
 configHash: 4a54bf86007e234b72ab01b77e0dc78ea85d6f127aefdf560b6886323a605194
 validation: PASS
+```
+
+**No deploy. No Firestore real. No Fase 7.**
+
+---
+
+### Ronda 2: fail-closed real en `/session/start` (último fix)
+
+**Veredicto:** `PASS_WITH_FIXES` sobre la ronda 1 de este mismo addendum — arquitectura y hash enforcement aprobados; quedaba un caso pequeño donde la verificación de `/session/start` podía fallar ABIERTA en vez de cerrada. Nada del version registry/storage/CLI/lifecycle se rehizo. No se avanzó a Fase 7.
+**Commit del fix (ronda 2):** `16efa0b4154076a6e0bf4c143c698c69f19b3fb7`
+
+**El hueco:** la condición de la ronda 1 era
+
+```ts
+if (activeRecord?.configHash && activeRecord.configHash !== result.hash) { /* fail */ }
+```
+
+que solo dispara cuando `activeRecord?.configHash` es *truthy*. Si el pointer decía `activeVersion = v1` pero `getVersion(v1)` devolvía `null` (ningún registro) o un registro SIN `configHash`, la condición entera se evaluaba `false` — la sesión arrancaba de todas formas, sin haber podido verificar nada sobre el contenido que supuestamente estaba usando. Ausencia de evidencia se estaba tratando como evidencia de ausencia de drift.
+
+**El fix:** un version record verificable pasa a ser una precondición OBLIGATORIA, no un chequeo opcional. `resolveScenarioConfigForNewSession` ahora exige, en orden, que:
+
+```
+activeRecord existe
+  Y
+activeRecord.configHash existe
+  Y
+(si activeRecord.status está presente) activeRecord.status === "active"
+  Y
+activeRecord.configHash === hash actual de los archivos
+→ resolved
+```
+
+Cualquier ausencia o inconsistencia en cualquiera de esos pasos → el mismo outcome de siempre, `no_config_for_organization`, con un mensaje `CONFIG_INTEGRITY_DRIFT` distinto por causa (registro ausente / sin hash / status inconsistente / hash distinto) que va únicamente a `console.error` — el cliente sigue viendo el 503 genérico de siempre, sin ningún outcome nuevo ni ninguna fuga de detalle.
+
+`ConfigVersionRegistry.getVersion` gana `status` en su tipo de retorno (`{ configHash?: string; status?: ConfigVersionStatus } | null`) — el registry real (`repositories/configVersions.ts`) ya devolvía `status` desde la entrega original de esta fase; solo hacía falta declararlo en la interfaz que `resolver.ts` consume, sin escribir ninguna lectura nueva.
+
+**Tests nuevos (3, `engine-config/resolver.test.ts`, 222 en el proyecto en total):**
+1. `activeVersion=v1` + `getVersion(v1) === null` → `no_config_for_organization`.
+2. `activeVersion=v1` + registro existente pero sin `configHash` → `no_config_for_organization` (antes: se saltaba la verificación y arrancaba la sesión).
+3. Pointer `v1` + registro de `v1` con `status: "deprecated"` (hash coincidente, para aislar que el fallo es por status, no por hash) → `no_config_for_organization`.
+4. (caso de control, ya existía, reescrito para usar un registro explícito y completo) registro `active` + hash correcto → `resolved`.
+
+Todos los demás tests de la entrega original de Fase 6 y de su ronda 1 de fixes se mantienen verdes — el `fakeRegistry` de test se ajustó para devolver, por defecto, un registro completo y coincidente (`{ configHash: "fake-hash:<org>:<version>", status: "active" }`) cuando un test no especifica lo contrario, así que ningún test que no le interesa esta verificación necesitó cambios de comportamiento, solo de fixture.
+
+**Resultados:**
+
+```
+$ npm test
+backend:  Test Files  17 passed (17) | Tests  222 passed (222)
+frontend: Test Files   2 passed (2)  | Tests    8 passed (8)
+```
+
+(222 = 219 de la ronda 1 de este addendum + 3 nuevas en `engine-config/resolver.test.ts`.)
+
+```
+$ npm run build
+backend:  tsc -p tsconfig.json  -> sin errores
+frontend: tsc -b && vite build  -> sin errores
 ```
 
 **No deploy. No Firestore real. No Fase 7.**
