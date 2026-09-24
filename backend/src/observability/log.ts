@@ -24,6 +24,20 @@ export interface LogFields {
   duration_ms?: number;
   outcome?: "success" | "failure" | "retry";
   error_category?: string;
+  // Fase 8 — COMMON_LOG_FIELDS. request_id/user_id/role/method/endpoint/
+  // status_code round out HTTP request observability; rate_limit_scope
+  // identifies which limiter (user/organization/global) rejected a
+  // request. user_id is the Firebase uid (a technical identifier, never
+  // an email) — see REDACTION_POLICY in
+  // PHASE_08_OBSERVABILITY_RATE_LIMITS_REPORT.md for why email/PII never
+  // belongs here.
+  request_id?: string;
+  user_id?: string;
+  role?: string;
+  method?: string;
+  endpoint?: string;
+  status_code?: number;
+  rate_limit_scope?: "user" | "organization" | "global" | "ip";
 }
 
 export function logEvent(fields: LogFields): void {

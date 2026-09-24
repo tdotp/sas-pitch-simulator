@@ -254,6 +254,11 @@ export async function evaluatePitch(params: {
   transcript: TranscriptTurn[];
   durationSeconds: number;
   metrics: SpeechMetrics;
+  // Fase 8 — ERROR_CORRELATION: the HTTP request_id that triggered this
+  // evaluation (routes.ts's req.id), threaded through purely for log
+  // correlation — never used for anything behavioral. Optional because
+  // not every caller has one (e.g. a future CLI/backfill tool).
+  requestId?: string;
 }): Promise<EvaluationResult> {
   const systemPrompt = buildEvaluatorSystemPrompt(params.resolved);
   const userMessage = buildEvaluatorUserMessage({
@@ -278,6 +283,11 @@ export async function evaluatePitch(params: {
     organization_id: params.resolved.organizationId,
     config_version: params.resolved.configVersion,
     scenario_id: params.resolved.scenario.id,
+    // Fase 8: only spread when present — a bare `request_id: undefined`
+    // would still be an own key on the object (unlike the JSON output of
+    // the real logEvent, which JSON.stringify drops), and tests assert on
+    // the object passed to logEvent directly, not its serialized form.
+    ...(params.requestId ? { request_id: params.requestId } : {}),
   };
 
   for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {

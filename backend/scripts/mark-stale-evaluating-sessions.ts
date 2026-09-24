@@ -29,6 +29,7 @@
 import { initFirebase, isAuthReady } from "../src/firebase.js";
 import { listEvaluatingSessionsOlderThan, markEvaluationFailed } from "../src/repositories/sessions.js";
 import { parseHours } from "./staleEvaluatingArgs.js";
+import { logEvent } from "../src/observability/log.js";
 
 // PASS_WITH_FIXES P1.2: --hours is validated BEFORE anything else in
 // main() touches Firebase — an invalid value (negative, zero, NaN,
@@ -86,6 +87,15 @@ async function main() {
     const result = await markEvaluationFailed(session.session_id, "STALE_EVALUATION_TIMEOUT");
     if (result.applied) {
       console.log(`[stale-evaluating-sweep] evaluation_failed: ${session.session_id}`);
+      // Fase 8 — LOG_NORMALIZATION: a real recovery action (not a dry-run
+      // preview) is exactly the "session recovery" family item 7 asks for.
+      logEvent({
+        event: "session_recovery",
+        session_id: session.session_id,
+        organization_id: session.organization_id,
+        error_category: "STALE_EVALUATION_TIMEOUT",
+        outcome: "success",
+      });
     } else {
       // Raced with a real /session/end (or an earlier run of this same
       // sweep) between listing and writing — expected occasionally, not an

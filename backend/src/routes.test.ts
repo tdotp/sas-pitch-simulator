@@ -3,7 +3,7 @@
 // providers (ElevenLabs, OpenRouter/evaluator, Firestore) and
 // firebase-admin's token verification are mocked so these tests run
 // without real credentials or network access.
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import request from "supertest";
 
@@ -24,9 +24,30 @@ vi.mock("firebase-admin", () => ({
   },
 }));
 
+// Fase 8: generous limits by default so the ~280 existing tests (many of
+// which reuse uid-1/org-1 across dozens of `it()` blocks against the SAME
+// module-level rate limiter buckets — see resetRateLimitStoresForTests)
+// never trip a 429 incidentally. Dedicated rate-limit tests below override
+// via resetRateLimitStoresForTests + a tighter per-test config where
+// needed, or exercise scopedRateLimit directly (rateLimit.test.ts).
 vi.mock("./config.js", () => ({
   config: {
     apiSharedToken: "", // shared-token gate disabled for these tests
+    rateLimits: {
+      sessionStart: {
+        user: { windowMs: 60_000, limit: 1000 },
+        organization: { windowMs: 60_000, limit: 1000 },
+        global: { windowMs: 60_000, limit: 1000 },
+      },
+      sessionEnd: {
+        user: { windowMs: 60_000, limit: 1000 },
+        organization: { windowMs: 60_000, limit: 1000 },
+        global: { windowMs: 60_000, limit: 1000 },
+      },
+      metricsAnalyze: {
+        user: { windowMs: 60_000, limit: 1000 },
+      },
+    },
   },
   assertElevenReady: () => null,
   assertOpenRouterReady: () => null,
@@ -278,6 +299,8 @@ vi.mock("./observability/log.js", () => ({
 }));
 
 const { router } = await import("./routes.js");
+const { resetRateLimitStoresForTests } = await import("./middleware/rateLimit.js");
+const { config: mockedConfig } = await import("./config.js");
 
 function buildApp() {
   const app = express();
@@ -296,6 +319,7 @@ beforeEach(() => {
   persistCompletedResultSecretlySucceeds = false;
   evaluatePitchMock.mockReset();
   logEventMock.mockClear();
+  resetRateLimitStoresForTests();
   evaluatePitchMock.mockResolvedValue({
     session_id: "evaluated",
     target_mode: "generic",
@@ -1515,6 +1539,16 @@ describe("Phase 6: CONFIG VERSIONING + PROVENANCE", () => {
       expect(after?.failure_reason).toBe("CONFIG_PROVENANCE_HASH_MISMATCH");
       // Never silently re-pinned/substituted:
       expect(after?.config_provenance).toMatchObject({ config_hash: "hash-org-1-v1" });
+
+      // Fase 8 — LOG_NORMALIZATION: alongside the console.error, a
+      // structured event now exists too.
+      const events = logEventMock.mock.calls.map((c) => c[0]).filter((f) => f.event === "config_integrity_failure");
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        error_category: "CONFIG_PROVENANCE_HASH_MISMATCH",
+        session_id: sessionId,
+        organization_id: "org-1",
+      });
     });
 
     it("2. active registry says v1/hash AAA but the loaded package now hashes to BBB -> new /session/start is rejected (503, generic)", async () => {
@@ -1581,5 +1615,317 @@ describe("Phase 6: CONFIG VERSIONING + PROVENANCE", () => {
       // resolved hash.
       expect(sessionsStore.get(sessionId)?.config_provenance).toEqual(provenanceBefore);
     });
+  });
+});
+
+// Fase 8: REQUEST_ID_POLICY + HTTP_REQUEST_LOGGING.
+describe("Fase 8: HTTP request observability", () => {
+  function httpRequestLogs() {
+    return logEventMock.mock.calls.map((call) => call[0]).filter((f) => f.event === "http_request");
+  }
+
+  it("GET /health gets a request_id and logs an http_request event with method/endpoint/status_code/duration_ms", async () => {
+    const res = await request(buildApp()).get("/api/health");
+    expect(res.status).toBe(200);
+
+    const logs = httpRequestLogs();
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ method: "GET", endpoint: "/health", status_code: 200 });
+    expect(typeof logs[0].request_id).toBe("string");
+    expect(logs[0].request_id.length).toBeGreaterThan(0);
+    expect(typeof logs[0].duration_ms).toBe("number");
+  });
+
+  it("each request gets a DIFFERENT request_id", async () => {
+    const app = buildApp();
+    await request(app).get("/api/health");
+    await request(app).get("/api/health");
+
+    const [first, second] = httpRequestLogs();
+    expect(first.request_id).not.toBe(second.request_id);
+  });
+
+  it("GET /me logs organization_id, user_id and role once auth/membership resolve", async () => {
+    asSingleOrgUser("uid-1", "org-1", "COACH");
+    const res = await request(buildApp()).get("/api/me").set("Authorization", "Bearer t1");
+    expect(res.status).toBe(200);
+
+    const logs = httpRequestLogs();
+    expect(logs[0]).toMatchObject({
+      method: "GET",
+      endpoint: "/me",
+      status_code: 200,
+      user_id: "uid-1",
+      organization_id: "org-1",
+      role: "COACH",
+      outcome: "success",
+    });
+  });
+
+  it("a failed request (400) is logged with status_code 400 and outcome failure, no organization_id/user_id when auth never resolved", async () => {
+    const res = await request(buildApp())
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({});
+    expect(res.status).toBe(401); // no verifyIdTokenMock stub -> requireAuth rejects first
+
+    const logs = httpRequestLogs();
+    expect(logs[0]).toMatchObject({ status_code: 401, outcome: "failure" });
+    expect(logs[0].user_id).toBeUndefined();
+    expect(logs[0].organization_id).toBeUndefined();
+  });
+
+  it("never logs the Authorization header, the request body, or a transcript", async () => {
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    await request(buildApp())
+      .post("/api/session/end")
+      .set("Authorization", "Bearer super-secret-token-value")
+      .send({ session_id: "does-not-exist", duration_seconds: 1, transcript: [{ role: "user", text: "muy secreto" }] });
+
+    const logs = httpRequestLogs();
+    const serialized = JSON.stringify(logs[0]);
+    expect(serialized).not.toContain("super-secret-token-value");
+    expect(serialized).not.toContain("muy secreto");
+    // Only whitelisted LogFields keys — no accidental `body`/`headers`/`authorization` key.
+    const allowedKeys = new Set([
+      "event",
+      "ts",
+      "session_id",
+      "organization_id",
+      "config_version",
+      "scenario_id",
+      "provider",
+      "attempt",
+      "duration_ms",
+      "outcome",
+      "error_category",
+      "request_id",
+      "user_id",
+      "role",
+      "method",
+      "endpoint",
+      "status_code",
+      "rate_limit_scope",
+    ]);
+    for (const key of Object.keys(logs[0])) {
+      expect(allowedKeys.has(key)).toBe(true);
+    }
+  });
+});
+
+// Fase 8 — LOG_NORMALIZATION: the config-integrity fail-closed paths in
+// /session/end (Fase 6) already logged a human console.error, but never a
+// structured event — making them invisible to the observability
+// summarizer. Each now ALSO emits a `config_integrity_failure` event.
+describe("Fase 8: config_integrity_failure structured event", () => {
+  it("LEGACY_CONFIG_VERSION_UNKNOWN emits a config_integrity_failure event", async () => {
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    sessionsStore.set("legacy-session-log", {
+      session_id: "legacy-session-log",
+      user_id: "uid-1",
+      organization_id: "org-1",
+      owner_uid: "uid-1",
+      scenario_id: "generic",
+      target_mode: "generic",
+      status: "in_progress",
+      started_at: "2026-01-01T00:00:00.000Z",
+    });
+
+    await request(buildApp())
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({ session_id: "legacy-session-log", duration_seconds: 30, transcript: [{ role: "user", text: "hola" }] });
+
+    const events = logEventMock.mock.calls.map((c) => c[0]).filter((f) => f.event === "config_integrity_failure");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      error_category: "LEGACY_CONFIG_VERSION_UNKNOWN",
+      session_id: "legacy-session-log",
+      organization_id: "org-1",
+      outcome: "failure",
+    });
+  });
+
+  it("CONFIG_VERSION_RESOLUTION_FAILED emits a config_integrity_failure event", async () => {
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    sessionsStore.set("unknown-version-log", {
+      session_id: "unknown-version-log",
+      user_id: "uid-1",
+      organization_id: "org-1",
+      owner_uid: "uid-1",
+      scenario_id: "not-a-known-scenario", // outside KNOWN_SCENARIO_IDS -> mock resolves "scenario_not_found"
+      target_mode: "not-a-known-scenario",
+      status: "in_progress",
+      started_at: "2026-01-01T00:00:00.000Z",
+      config_provenance: {
+        config_version: "v-does-not-exist",
+        interviewer_profile_id: "p1",
+        evaluation_framework_id: "f1",
+        content_source_ids: [],
+        config_hash: "irrelevant",
+      },
+    });
+
+    await request(buildApp())
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({ session_id: "unknown-version-log", duration_seconds: 30, transcript: [{ role: "user", text: "hola" }] });
+
+    const events = logEventMock.mock.calls.map((c) => c[0]).filter((f) => f.event === "config_integrity_failure");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      error_category: "CONFIG_VERSION_RESOLUTION_FAILED",
+      session_id: "unknown-version-log",
+      organization_id: "org-1",
+    });
+  });
+});
+
+// Fase 8: USER_LIMITS / ORGANIZATION_LIMITS / MULTITENANT_SAFETY, exercised
+// through the real routes.ts wiring (not just the rateLimit.ts unit tests).
+// scopedRateLimit reads `cfg.limit`/`cfg.windowMs` live on every request
+// (see rateLimit.ts), so mutating the mocked config's rateLimits values
+// here actually changes the already-built middleware's behavior without
+// needing to fire 1000+ requests or reset modules.
+describe("Fase 8: rate limiting wiring", () => {
+  const defaultRateLimits = JSON.parse(JSON.stringify(mockedConfig.rateLimits));
+
+  afterEach(() => {
+    // Deep-restore so a test that lowers a limit never bleeds into a
+    // later, unrelated test elsewhere in this file.
+    mockedConfig.rateLimits.sessionStart.user.limit = defaultRateLimits.sessionStart.user.limit;
+    mockedConfig.rateLimits.sessionStart.organization.limit = defaultRateLimits.sessionStart.organization.limit;
+    mockedConfig.rateLimits.sessionStart.global.limit = defaultRateLimits.sessionStart.global.limit;
+    mockedConfig.rateLimits.sessionEnd.user.limit = defaultRateLimits.sessionEnd.user.limit;
+    mockedConfig.rateLimits.sessionEnd.organization.limit = defaultRateLimits.sessionEnd.organization.limit;
+    mockedConfig.rateLimits.sessionEnd.global.limit = defaultRateLimits.sessionEnd.global.limit;
+    mockedConfig.rateLimits.metricsAnalyze.user.limit = defaultRateLimits.metricsAnalyze.user.limit;
+  });
+
+  it("the same user exceeding the user limit on /session/start gets 429 with Retry-After", async () => {
+    mockedConfig.rateLimits.sessionStart.user.limit = 1;
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const app = buildApp();
+
+    const res1 = await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
+    expect(res1.status).toBe(200);
+
+    const res2 = await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
+    expect(res2.status).toBe(429);
+    expect(res2.body).toMatchObject({ retry_after_seconds: expect.any(Number) });
+    expect(res2.headers["retry-after"]).toBeDefined();
+  });
+
+  it("a 429 emits a structured rate_limit_rejected event", async () => {
+    mockedConfig.rateLimits.sessionStart.user.limit = 1;
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const app = buildApp();
+    await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
+    await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
+
+    const rejections = logEventMock.mock.calls.map((c) => c[0]).filter((f) => f.event === "rate_limit_rejected");
+    expect(rejections).toHaveLength(1);
+    expect(rejections[0]).toMatchObject({
+      user_id: "uid-1",
+      organization_id: "org-1",
+      endpoint: "/session/start",
+      rate_limit_scope: "user",
+    });
+  });
+
+  it("a DIFFERENT user is unaffected by another user's exhausted user-limit bucket", async () => {
+    mockedConfig.rateLimits.sessionStart.user.limit = 1;
+    const app = buildApp();
+
+    asSingleOrgUser("uid-a", "org-1", "SPOKESPERSON");
+    await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
+    await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" }); // exhausts uid-a
+
+    asSingleOrgUser("uid-b", "org-1", "SPOKESPERSON");
+    const resB = await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
+    expect(resB.status).toBe(200);
+  });
+
+  it("/session/start and /session/end enforce independent user limits (different endpoints, different buckets)", async () => {
+    mockedConfig.rateLimits.sessionStart.user.limit = 1;
+    asSingleOrgUser("uid-1", "org-1", "SPOKESPERSON");
+    const app = buildApp();
+
+    const startRes1 = await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
+    expect(startRes1.status).toBe(200);
+    const startRes2 = await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
+    expect(startRes2.status).toBe(429); // /session/start user-limit exhausted
+
+    // /session/end must be unaffected — same user, different endpoint bucket.
+    const endRes = await request(app)
+      .post("/api/session/end")
+      .set("Authorization", "Bearer t1")
+      .send({ session_id: "does-not-exist", duration_seconds: 1, transcript: [{ role: "user", text: "hola" }] });
+    expect(endRes.status).not.toBe(429);
+  });
+
+  it("organization limit blocks a second user in the SAME org once the org bucket is exhausted, independent of the user limit", async () => {
+    mockedConfig.rateLimits.sessionStart.organization.limit = 1;
+    const app = buildApp();
+
+    asSingleOrgUser("uid-a", "org-1", "SPOKESPERSON");
+    const resA = await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
+    expect(resA.status).toBe(200);
+
+    asSingleOrgUser("uid-b", "org-1", "SPOKESPERSON"); // different user, SAME org
+    const resB = await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
+    expect(resB.status).toBe(429);
+  });
+
+  it("TENANT_TRUST_BOUNDARY: a spoofed body.organization_id never affects which org bucket is charged", async () => {
+    mockedConfig.rateLimits.sessionStart.organization.limit = 1;
+    const app = buildApp();
+
+    // Real org is org-A (from Membership); body claims org-B.
+    asSingleOrgUser("uid-1", "org-A", "SPOKESPERSON");
+    getOrganizationMock.mockImplementation(async (id: string) => ({
+      id,
+      name: id,
+      slug: id,
+      status: "active",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    }));
+    await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic", organization_id: "org-B" });
+
+    // A genuine org-B caller must be unaffected — proves the spoofed body
+    // field in the previous request never touched org-B's real bucket.
+    listMembershipsByUserMock.mockReset();
+    listMembershipsByUserMock.mockResolvedValue([membership({ user_id: "uid-2", organization_id: "org-B" })]);
+    verifyIdTokenMock.mockResolvedValue({ uid: "uid-2", email: "uid-2@test.com" });
+    getUserMock.mockResolvedValue({
+      uid: "uid-2",
+      email: "uid-2@test.com",
+      display_name: null,
+      status: "active",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+    const resGenuineOrgB = await request(app)
+      .post("/api/session/start")
+      .set("Authorization", "Bearer t1")
+      .send({ target_mode: "generic" });
+    expect(resGenuineOrgB.status).toBe(200);
+  });
+
+  it("global limit caps total traffic to an endpoint across ALL users/orgs", async () => {
+    mockedConfig.rateLimits.sessionStart.global.limit = 1;
+    const app = buildApp();
+
+    asSingleOrgUser("uid-a", "org-a", "SPOKESPERSON");
+    const resA = await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
+    expect(resA.status).toBe(200);
+
+    asSingleOrgUser("uid-b", "org-b", "SPOKESPERSON"); // different user AND org
+    const resB = await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
+    expect(resB.status).toBe(429); // global safety cap, independent of user/org
   });
 });

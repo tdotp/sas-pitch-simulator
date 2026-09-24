@@ -34,8 +34,16 @@ import {
   listSessionsByOrganization,
 } from "./repositories/sessions.js";
 import { logEvent, elapsedMs } from "./observability/log.js";
+import { requestId } from "./middleware/requestId.js";
+import { requestLogging } from "./middleware/requestLogging.js";
+import { userScopedLimiter, organizationScopedLimiter, globalScopedLimiter } from "./middleware/rateLimit.js";
 
 export const router = Router();
+
+// Fase 8 — REQUEST_ID_POLICY + HTTP_REQUEST_LOGGING: applies to EVERY route
+// on this router, including /health, so request_id/duration/status_code
+// are available before any auth/tenant/rate-limit concern even exists.
+router.use(requestId, requestLogging);
 
 // Fase 7 — FIRESTORE_FAILURE_POLICY: markEvaluationFailed on these
 // fail-closed paths is deliberately best-effort (the caller already
@@ -104,6 +112,9 @@ router.post(
   "/session/start",
   requireAuth,
   requireMembership,
+  userScopedLimiter("/session/start", config.rateLimits.sessionStart.user),
+  organizationScopedLimiter("/session/start", config.rateLimits.sessionStart.organization),
+  globalScopedLimiter("/session/start", config.rateLimits.sessionStart.global),
   async (req: Request, res: Response) => {
     const elevenErr = assertElevenReady();
     if (elevenErr) return res.status(503).json({ error: elevenErr });
@@ -146,7 +157,7 @@ router.post(
     // the raw error message to the client.
     let signed;
     try {
-      signed = await getSignedUrl(resolved, body.voice_gender);
+      signed = await getSignedUrl(resolved, body.voice_gender, req.id);
     } catch (err) {
       console.error("[/session/start] getSignedUrl falló:", (err as Error).message);
       return res.status(502).json({ error: "No se pudo iniciar la sesión de voz. Intenta de nuevo." });
@@ -236,6 +247,9 @@ router.post(
   "/session/end",
   requireAuth,
   requireMembership,
+  userScopedLimiter("/session/end", config.rateLimits.sessionEnd.user),
+  organizationScopedLimiter("/session/end", config.rateLimits.sessionEnd.organization),
+  globalScopedLimiter("/session/end", config.rateLimits.sessionEnd.global),
   async (req: Request, res: Response) => {
     const orErr = assertOpenRouterReady();
     if (orErr) return res.status(503).json({ error: orErr });
@@ -338,6 +352,13 @@ router.post(
         `[/session/end] session=${session_id} no tiene config_provenance.config_version ` +
           `(sesión legacy pre-Fase-6 o provenance ausente) — fail-closed, no se adivina versión.`
       );
+      logEvent({
+        event: "config_integrity_failure",
+        session_id,
+        organization_id: claim.session.organization_id,
+        error_category: "LEGACY_CONFIG_VERSION_UNKNOWN",
+        outcome: "failure",
+      });
       await markEvaluationFailedLogged(session_id, "LEGACY_CONFIG_VERSION_UNKNOWN");
       return res.status(503).json({
         error: "Esta sesión no tiene una versión de configuración registrada y no puede evaluarse.",
@@ -354,6 +375,15 @@ router.post(
         `[/session/end] no se pudo re-resolver la config para session=${session_id} ` +
           `org=${claim.session.organization_id} scenario=${scenarioId} config_version=${provenance.config_version}: ${scenarioResult.outcome}`
       );
+      logEvent({
+        event: "config_integrity_failure",
+        session_id,
+        organization_id: claim.session.organization_id,
+        config_version: provenance.config_version,
+        scenario_id: scenarioId,
+        error_category: "CONFIG_VERSION_RESOLUTION_FAILED",
+        outcome: "failure",
+      });
       await markEvaluationFailedLogged(session_id, "CONFIG_VERSION_RESOLUTION_FAILED");
       return res.status(503).json({ error: "No se pudo evaluar la sesión. Intenta de nuevo más tarde." });
     }
@@ -376,6 +406,14 @@ router.post(
           `pinned=${provenance.config_hash} resolved=${resolved.configHash} — el contenido de esta versión ` +
           `cambió después de que la sesión inició.`
       );
+      logEvent({
+        event: "config_integrity_failure",
+        session_id,
+        organization_id: claim.session.organization_id,
+        config_version: provenance.config_version,
+        error_category: "CONFIG_PROVENANCE_HASH_MISMATCH",
+        outcome: "failure",
+      });
       await markEvaluationFailedLogged(session_id, "CONFIG_PROVENANCE_HASH_MISMATCH");
       return res.status(503).json({ error: "No se pudo evaluar la sesión. Intenta de nuevo más tarde." });
     }
@@ -391,6 +429,7 @@ router.post(
         transcript,
         durationSeconds: duration,
         metrics,
+        requestId: req.id,
       });
     } catch (err) {
       // Safe category only (e.g. "OPENROUTER_TIMEOUT") gets persisted as
@@ -503,6 +542,7 @@ router.post(
   "/metrics/analyze",
   requireAuth,
   requireMembership,
+  userScopedLimiter("/metrics/analyze", config.rateLimits.metricsAnalyze.user),
   (req: Request, res: Response) => {
     const { transcript, duration_seconds } = req.body as {
       transcript?: TranscriptTurn[];

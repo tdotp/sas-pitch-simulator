@@ -12,6 +12,17 @@ function req(name: string, fallback?: string): string {
   return v;
 }
 
+// Fase 8 — USER_LIMITS/ORGANIZATION_LIMITS/GLOBAL_LIMITS. Falls back to
+// `fallback` for an unset OR non-numeric env value rather than producing
+// NaN (which would make every request either always-reject or
+// never-reject, a silent footgun for a rate limit).
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 export const config = {
   port: parseInt(process.env.PORT ?? "8080", 10),
   corsOrigins: (process.env.CORS_ORIGINS ?? "http://localhost:5173")
@@ -52,6 +63,31 @@ export const config = {
   // rate-limiter below. If unset, the check is skipped (local dev default).
   // It is anti-abuse only — never treat it as authentication.
   apiSharedToken: req("API_SHARED_TOKEN"),
+
+  // Fase 8 — RATE_LIMIT_INVENTORY. Defaults are CONSERVATIVE ESTIMATES,
+  // not load-tested numbers — see RATE_LIMIT_STORAGE_DECISION /
+  // USER_LIMITS in PHASE_08_OBSERVABILITY_RATE_LIMITS_REPORT.md. All
+  // overridable per-env without a code change. /session/start costs one
+  // ElevenLabs signed-url call; /session/end costs one OpenRouter
+  // evaluation (up to 2 attempts × 30s) — both real, external-provider
+  // costs, unlike /metrics/analyze (local computation only, no external
+  // call), which gets a lighter single per-user limit and no
+  // organization/global tier.
+  rateLimits: {
+    sessionStart: {
+      user: { windowMs: 60_000, limit: envInt("RATE_LIMIT_SESSION_START_USER_PER_MIN", 6) },
+      organization: { windowMs: 60_000, limit: envInt("RATE_LIMIT_SESSION_START_ORG_PER_MIN", 30) },
+      global: { windowMs: 60_000, limit: envInt("RATE_LIMIT_SESSION_START_GLOBAL_PER_MIN", 120) },
+    },
+    sessionEnd: {
+      user: { windowMs: 60_000, limit: envInt("RATE_LIMIT_SESSION_END_USER_PER_MIN", 4) },
+      organization: { windowMs: 60_000, limit: envInt("RATE_LIMIT_SESSION_END_ORG_PER_MIN", 20) },
+      global: { windowMs: 60_000, limit: envInt("RATE_LIMIT_SESSION_END_GLOBAL_PER_MIN", 80) },
+    },
+    metricsAnalyze: {
+      user: { windowMs: 60_000, limit: envInt("RATE_LIMIT_METRICS_ANALYZE_USER_PER_MIN", 30) },
+    },
+  },
 
   // AUTH_ALLOWED_EMAILS (the Phase 1 temporary allowlist) was retired in
   // Phase 3: every sensitive route now requires requireMembership, which

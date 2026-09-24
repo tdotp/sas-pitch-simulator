@@ -80,6 +80,32 @@ describe("buildOverrides", () => {
 });
 
 describe("getSignedUrl", () => {
+  // Fase 8 — ERROR_CORRELATION: an optional requestId threads into the
+  // elevenlabs_signed_url log line.
+  it("includes request_id in the log when a requestId is passed", async () => {
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      text: async () => "",
+      json: async () => ({ signed_url: "wss://example.test/signed" }),
+    });
+
+    await getSignedUrl(resolvedFor("org-a"), undefined, "req-xyz");
+
+    expect(logEvent.mock.calls[0][0]).toMatchObject({ request_id: "req-xyz" });
+  });
+
+  it("omits request_id entirely when not passed", async () => {
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      text: async () => "",
+      json: async () => ({ signed_url: "wss://example.test/signed" }),
+    });
+
+    await getSignedUrl(resolvedFor("org-a"));
+
+    expect("request_id" in logEvent.mock.calls[0][0]).toBe(false);
+  });
+
   it("resolves the voice from InterviewerProfile.voice.slot, not a TargetMode", async () => {
     (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: true,

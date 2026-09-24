@@ -113,7 +113,10 @@ export function buildOverrides(resolved: ResolvedScenarioConfig, voiceId: string
 
 export async function getSignedUrl(
   resolved: ResolvedScenarioConfig,
-  requestedVoice?: VoiceGender
+  requestedVoice?: VoiceGender,
+  // Fase 8 — ERROR_CORRELATION: routes.ts's req.id, threaded through
+  // purely for log correlation.
+  requestId?: string
 ): Promise<SignedUrlResult> {
   const agentId = config.elevenlabs.agentId;
   const { voiceId, gender } = resolveVoice(resolved.interviewerProfile.voice.slot, requestedVoice);
@@ -143,7 +146,7 @@ export async function getSignedUrl(
             `ElevenLabs signed-url request failed: ${(err as Error).message}`,
             "ELEVENLABS_NETWORK_ERROR" as const
           );
-    logSignedUrlOutcome(start, "failure", elevenErr.category);
+    logSignedUrlOutcome(start, "failure", requestId, elevenErr.category);
     throw elevenErr;
   } finally {
     clearTimeout(timer);
@@ -154,7 +157,7 @@ export async function getSignedUrl(
     // returned to the client) — never in `.category`.
     const body = await res.text();
     const category = categoryForStatus(res.status);
-    logSignedUrlOutcome(start, "failure", category);
+    logSignedUrlOutcome(start, "failure", requestId, category);
     throw new ElevenLabsError(`ElevenLabs signed-url failed (${res.status}): ${body.slice(0, 300)}`, category);
   }
 
@@ -171,7 +174,7 @@ export async function getSignedUrl(
   try {
     rawBody = await res.json();
   } catch {
-    logSignedUrlOutcome(start, "failure", "ELEVENLABS_INVALID_RESPONSE");
+    logSignedUrlOutcome(start, "failure", requestId, "ELEVENLABS_INVALID_RESPONSE");
     throw new ElevenLabsError(
       "ElevenLabs signed-url response was not valid JSON",
       "ELEVENLABS_INVALID_RESPONSE"
@@ -179,14 +182,14 @@ export async function getSignedUrl(
   }
   const parsed = SignedUrlResponseSchema.safeParse(rawBody);
   if (!parsed.success) {
-    logSignedUrlOutcome(start, "failure", "ELEVENLABS_INVALID_RESPONSE");
+    logSignedUrlOutcome(start, "failure", requestId, "ELEVENLABS_INVALID_RESPONSE");
     throw new ElevenLabsError(
       `ElevenLabs signed-url response failed validation: ${parsed.error.message}`,
       "ELEVENLABS_INVALID_RESPONSE"
     );
   }
 
-  logSignedUrlOutcome(start, "success");
+  logSignedUrlOutcome(start, "success", requestId);
 
   return {
     signed_url: parsed.data.signed_url,
@@ -203,6 +206,7 @@ export async function getSignedUrl(
 function logSignedUrlOutcome(
   startMs: number,
   outcome: "success" | "failure",
+  requestId?: string,
   error_category?: ElevenLabsFailureCategory
 ): void {
   logEvent({
@@ -210,6 +214,7 @@ function logSignedUrlOutcome(
     provider: "elevenlabs",
     duration_ms: elapsedMs(startMs),
     outcome,
+    ...(requestId ? { request_id: requestId } : {}),
     ...(error_category ? { error_category } : {}),
   });
 }

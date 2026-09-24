@@ -14,7 +14,8 @@
     "sessions:mark-stale-evaluating": "tsx scripts/mark-stale-evaluating-sessions.ts",
     "config:validate": "tsx scripts/config-validate.ts",
     "config:import": "tsx scripts/config-import.ts",
-    "config:activate": "tsx scripts/config-activate.ts"
+    "config:activate": "tsx scripts/config-activate.ts",
+    "observability:summarize": "tsx scripts/observability-summarize.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",

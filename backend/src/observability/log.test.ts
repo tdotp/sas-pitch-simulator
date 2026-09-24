@@ -42,6 +42,35 @@ describe("logEvent", () => {
     expect("session_id" in parsed).toBe(false);
     expect("error_category" in parsed).toBe(false);
   });
+
+  // Fase 8: request-scoped fields (COMMON_LOG_FIELDS).
+  it("accepts the Fase 8 request-scoped fields (request_id, method, endpoint, status_code, user_id, role, rate_limit_scope)", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+    logEvent({
+      event: "http_request",
+      request_id: "req-1",
+      method: "POST",
+      endpoint: "/session/start",
+      status_code: 200,
+      user_id: "uid-1",
+      role: "SPOKESPERSON",
+      rate_limit_scope: "user",
+      duration_ms: 12,
+      outcome: "success",
+    });
+
+    const parsed = JSON.parse(spy.mock.calls[0][0] as string);
+    expect(parsed).toMatchObject({
+      event: "http_request",
+      request_id: "req-1",
+      method: "POST",
+      endpoint: "/session/start",
+      status_code: 200,
+      user_id: "uid-1",
+      role: "SPOKESPERSON",
+      rate_limit_scope: "user",
+    });
+  });
 });
 
 describe("elapsedMs", () => {

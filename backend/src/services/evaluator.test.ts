@@ -569,4 +569,25 @@ describe("evaluatePitch", () => {
     expect(totalLog).toMatchObject({ session_id: "s1", outcome: "success" });
     expect(typeof totalLog.duration_ms).toBe("number");
   });
+
+  // Fase 8 — ERROR_CORRELATION: an optional requestId threads into every
+  // log line for this evaluation, so a provider failure can be traced
+  // back to the exact HTTP request that triggered it.
+  it("includes request_id in openrouter_attempt/evaluation_total logs when provided", async () => {
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(okOpenRouterResponse(75));
+    await evaluatePitch({ ...baseParams, requestId: "req-abc" });
+
+    for (const call of logEvent.mock.calls) {
+      expect(call[0]).toMatchObject({ request_id: "req-abc" });
+    }
+  });
+
+  it("omits request_id entirely when not provided (doesn't log it as undefined)", async () => {
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(okOpenRouterResponse(75));
+    await evaluatePitch(baseParams);
+
+    for (const call of logEvent.mock.calls) {
+      expect("request_id" in call[0]).toBe(false);
+    }
+  });
 });
