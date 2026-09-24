@@ -27,12 +27,25 @@ export interface ArchitectureViolation {
   snippet: string;
 }
 
+// This module IS the rules definition — it necessarily contains each
+// pattern's literal source text and rule id as DATA (inside a RegExp
+// literal or a description string), never as contaminated application
+// code. Every rule allowlists its own defining file for this reason;
+// this is the one allowlist entry that applies uniformly, so it is
+// factored out instead of repeated five times.
+const SELF: { file: string; reason: string } = {
+  file: "src/architecture/genericEngineScan.ts",
+  reason:
+    "This file defines the ENGINE_GENERICITY rules themselves — the pattern source and rule id/description strings are data describing what to detect, not application code exhibiting the violation.",
+};
+
 export const ARCHITECTURE_RULES: ArchitectureRule[] = [
   {
     id: "ENGINE_GENERICITY_CLIENT_LITERALS",
     description: "No hardcoded client-specific literals in generic engine source (Fase 5 regression).",
     pattern: /mentioned_sas|mentioned_novo|aligned_to_playbook|SAS_RE|SANDRA/,
     allow: [
+      SELF,
       {
         file: "src/types.ts",
         reason:
@@ -44,7 +57,7 @@ export const ARCHITECTURE_RULES: ArchitectureRule[] = [
     id: "ENGINE_GENERICITY_NO_APP_USERS",
     description: "No resurrection of the flat APP_USERS credential map removed in Fase 1.",
     pattern: /APP_USERS/,
-    allow: [],
+    allow: [SELF],
   },
   {
     id: "ENGINE_GENERICITY_NO_SHARED_TOKEN_IDENTITY",
@@ -52,6 +65,7 @@ export const ARCHITECTURE_RULES: ArchitectureRule[] = [
       "The x-app-token anti-abuse gate (Fase 1) may exist in exactly one place and must never become an identity/role source.",
     pattern: /x-app-token/,
     allow: [
+      SELF,
       {
         file: "src/routes.ts",
         reason:
@@ -63,13 +77,13 @@ export const ARCHITECTURE_RULES: ArchitectureRule[] = [
     id: "ENGINE_GENERICITY_NO_LEXICOGRAPHIC_VERSION_PICK",
     description: "No '.sort().reverse()' version auto-selection (the exact anti-pattern removed in Fase 6).",
     pattern: /\.sort\(\s*\)\s*\.reverse\(\s*\)/,
-    allow: [],
+    allow: [SELF],
   },
   {
     id: "ENGINE_GENERICITY_NO_LITERAL_TENANT_BRANCH",
     description: "No branching on a hardcoded client/org/organizationId string literal.",
     pattern: /\b(client|org|organization|organizationId)\s*===\s*["']/,
-    allow: [],
+    allow: [SELF],
   },
 ];
 
