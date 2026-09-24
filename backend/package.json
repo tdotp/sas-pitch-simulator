@@ -13,9 +13,13 @@
     "sessions:mark-abandoned": "tsx scripts/mark-abandoned-sessions.ts",
     "sessions:mark-stale-evaluating": "tsx scripts/mark-stale-evaluating-sessions.ts",
     "config:validate": "tsx scripts/config-validate.ts",
+    "config:validate-all": "tsx scripts/config-validate-all.ts",
     "config:import": "tsx scripts/config-import.ts",
     "config:activate": "tsx scripts/config-activate.ts",
-    "observability:summarize": "tsx scripts/observability-summarize.ts"
+    "observability:summarize": "tsx scripts/observability-summarize.ts",
+    "architecture:scan": "tsx scripts/architecture-scan.ts",
+    "typecheck:scripts": "tsc --noEmit -p tsconfig.quality-gate.json",
+    "quality:gate": "tsx scripts/run-quality-gate.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",
