@@ -337,3 +337,54 @@ frontend tsc -b && vite build          → PASS
 ```
 
 No deploy. No Firestore real. No Fase 9.
+
+---
+
+## PASS_WITH_FIXES_ADDENDUM (ronda 2) — trust proxy
+
+Revisión técnica: `PASS_WITH_FIXES`. Sin rehacer rate limiting ni observability — 1 P1 cerrado.
+
+**Commit del fix:** `0e9d25c224078e284951832a2c046207635d16a6`
+
+### P1 — `req.ip` debe representar al cliente real detrás del reverse proxy
+
+`backend/src/index.ts` nunca configuraba la política `trust proxy` de Express. Sin ella, Express ignora `X-Forwarded-For` por completo y `req.ip` es siempre la dirección de quien conecta directamente al proceso — en el deployment real, siempre el contenedor de Caddy. Efecto: `ipScopedLimiter` (300/min) colapsaba en un único bucket compartido por TODO el tráfico que pasa por el proxy, no uno por cliente real.
+
+**Política final de `trust proxy`:** `app.set("trust proxy", 1)` — un único hop de confianza, vía la constante `TRUSTED_PROXY_HOPS = 1` ([trustProxy.ts](backend/src/trustProxy.ts)).
+
+**Grounding en la topología real** (verificado contra `docker-compose.yml` + `Caddyfile` del repo, no asumido):
+```
+internet → Caddy (único servicio con `ports:` en docker-compose, 80/443)
+        → backend (`expose: "8080"` sin `ports:` — inalcanzable desde
+          fuera de la red docker `sas-net`)
+```
+Exactamente un reverse proxy real; el backend no puede recibir una conexión TCP directa desde internet bajo ninguna circunstancia de este deployment.
+
+**Premisa operacional documentada** (en `trustProxy.ts`, no solo en este reporte):
+1. **Hops confiados:** exactamente 1 (Caddy).
+2. **Condición bajo la cual el backend recibe tráfico:** únicamente vía `reverse_proxy backend:8080` de Caddy, que añade la dirección real del peer que observó a `X-Forwarded-For` (comportamiento estándar de Caddy) en vez de reenviar sin modificar un header suministrado por el cliente.
+3. **Por qué un cliente no puede falsificar su IP:** con `trust proxy=1`, Express (vía `proxy-addr`) lee ÚNICAMENTE la entrada más a la derecha de `X-Forwarded-For` — la que Caddy mismo añadió — e ignora cualquier hop que un cliente anteponga a la izquierda. Verificado empíricamente antes de escribir los tests (`node` ad-hoc contra una app Express real): con `trust proxy=1`, `X-Forwarded-For: "1.1.1.1, 9.9.9.9"` resuelve `req.ip = "9.9.9.9"` (la entrada de la derecha) sin importar qué anteponga el cliente; con `trust proxy=2` (número incorrecto para esta topología, solo como contraste) resolvería `req.ip = "1.1.1.1"`, la entrada que el cliente SÍ controla — exactamente la vulnerabilidad que un número mal elegido introduciría.
+
+**No se tocó `ipScopedLimiter`** (`middleware/rateLimit.ts`), tal como se pidió — el fix vive enteramente en `index.ts` (política de Express) + el nuevo módulo `trustProxy.ts` (la constante + su documentación).
+
+**Tests nuevos** (`trustProxy.test.ts`, 6 tests, contra una app Express mínima con el `ipScopedLimiter` REAL — no mockeado, ni tampoco la app completa con todo el mocking de `routes.ts`, deliberadamente, para aislar justo esta integración):
+- Dos clientes distintos (`X-Forwarded-For` distinto) detrás del mismo proxy simulado → buckets independientes.
+- El mismo cliente alcanza su propio límite → 429 en la segunda request.
+- `TRUST_PROXY_SPOOFING` (anti-spoofing, 2 casos): un cliente que antepone hops falsos a `X-Forwarded-For` no logra escapar de su propio bucket (sigue cayendo en el mismo, ya agotado) NI logra impersonar el bucket de otro cliente real (su propia entrada real, la que el proxy confiable observó, es la que cuenta).
+- Fallback correcto a la dirección del socket cuando no hay `X-Forwarded-For` en absoluto (conexión directa/local).
+
+### TEST_RESULTS (tras este fix)
+
+```
+backend:  24 archivos, 335 tests, PASS  (329 -> 335: +6 de esta ronda, verificado 3 corridas consecutivas)
+frontend:  2 archivos,   8 tests, PASS (sin cambios)
+```
+
+### BUILD_RESULTS (tras este fix)
+
+```
+backend  tsc -p tsconfig.json          → PASS
+frontend tsc -b && vite build          → PASS
+```
+
+No deploy. No Firestore real. No Fase 9.
