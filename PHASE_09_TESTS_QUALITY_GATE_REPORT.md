@@ -199,17 +199,84 @@ Ninguno bloqueante. `P0 = 0`, `P1 = 0`.
 
 ## CRITERIO_DE_CIERRE
 
-- ✅ Todos los tests Fase 1–8 siguen verdes (353/353 backend incluyendo los 335 originales, 8/8 frontend)
+- ✅ Todos los tests Fase 1–8 siguen verdes (363/363 backend tras el addendum, incluyendo los 335 originales, 8/8 frontend)
 - ✅ Quality gate único existe (`npm run quality:gate`)
 - ✅ Quality gate pasa (7/7, exit 0)
 - ✅ Gate es offline/hermético (ver OFFLINE_SAFETY)
 - ✅ Config packages se validan (los 3 reales, en una pasada)
-- ✅ Critical architecture checks pasan (0 violaciones ENGINE_GENERICITY)
-- ✅ Negative controls demuestran que los checks pueden fallar (3 negative controls, ver NEGATIVE_CONTROLS)
+- ✅ Critical architecture checks pasan (0 violaciones ENGINE_GENERICITY, 6 reglas tras el addendum)
+- ✅ Negative controls demuestran que los checks pueden fallar (ver NEGATIVE_CONTROLS + addendum: loop sistemático por regla)
 - ✅ Tenant/security invariants siguen cubiertas (ninguna se tocó)
 - ✅ Frontend build/test sigue verde
 - ✅ Backend build/test sigue verde
 - ✅ No deploy, no Firestore real, no providers reales
 - ✅ P0 = 0, P1 = 0
 
-**FASE 9: PASS**
+**FASE 9: PASS** (revisión técnica externa: `PASS_WITH_FIXES` — fixes de la ronda 1 abajo, ambos cerrados)
+
+---
+
+## PASS_WITH_FIXES ADDENDUM — RONDA 1
+
+Revisión técnica externa: quality gate, CI, config validation, orchestrator y offline safety **quedan aprobados sin cambios**. 1 P1 + 1 P2, ambos corregidos sin tocar ninguna de esas piezas ni el runtime de la app.
+
+### P1 — ENGINE_GENERICITY no detectaba client/org literals fuera de un branch `===`
+
+**Hallazgo:** `ENGINE_GENERICITY_NO_LITERAL_TENANT_BRANCH` solo dispara sobre `organizationId === "org-id"`. Un literal hardcodeado sin ningún branch —`const DEFAULT_ORG = "sas-colombia";` o `const supported = ["acme-demo"];`— pasaba sin ser detectado. El architecture gate podía dar PASS con contaminación client-specific real.
+
+**Fix:** nueva regla `ENGINE_GENERICITY_NO_ORG_ID_LITERAL` en `backend/src/architecture/genericEngineScan.ts`. Lista estática y explícita `KNOWN_CLIENT_ORG_IDS = ["sas-colombia", "acme-demo"]` (los dos organizationIds reales committeados hoy bajo `config-packages/`, documentados con un comentario de cómo extenderla al onboardear un cliente nuevo). Pattern: `["'](?:sas-colombia|acme-demo)["']` — exige que el literal completo entre comillas sea exactamente el id (evita falsos positivos como `"sas-colombia-legacy-import"`, verificado por test). Sin AST, mismo mecanismo que las 5 reglas existentes.
+
+El scan solo camina `backend/src/` (nunca `config-packages/`, fixtures o docs) — los nombres de cliente siguen siendo legales ahí, sin necesidad de excepción alguna.
+
+**Excepción legítima encontrada y documentada** (no silenciada): `src/routes.ts:125`, un comentario explicativo pre-existente ("...nothing here knows what \"davivienda\" or \"sas-colombia\" mean") que ilustra precisamente la genericidad del handler — es documentación, no un hardcode. Allowlisteado explícitamente en la definición de la regla, con la razón inline.
+
+**Negative controls (sin tocar source real):**
+- `genericEngineScan.test.ts`: `"ENGINE_GENERICITY: flags a bare known-organizationId literal with no '===' branch at all"` → `const DEFAULT_ORG = "sas-colombia";`
+- `genericEngineScan.test.ts`: `"ENGINE_GENERICITY: flags a known-organizationId literal inside an array literal"` → `const supportedOrganizations = ["acme-demo"];`
+- Ambos verificados contra el scanner real (`scanContentForViolations`), produciendo `ENGINE_GENERICITY_NO_ORG_ID_LITERAL`.
+
+### P2 — el test de "cobertura de reglas" no demostraba que cada regla pudiera fallar
+
+**Hallazgo:** `"every rule has at least one test exercising it"` comparaba dos listas estáticas de ids — no ejecutaba nada, no probaba que cada regla tuviera un caso capaz de dispararla.
+
+**Fix:** reemplazado por una tabla `NEGATIVE_CONTROL_SNIPPETS: Record<ruleId, string>` (un snippet sintético por regla, incluyendo ahora `ENGINE_GENERICITY_NO_SHARED_TOKEN_IDENTITY` con un `x-app-token` fuera de `routes.ts`) + un loop que genera un `it()` por regla, corre su snippet por `scanContentForViolations` de verdad y verifica que produce esa violación exacta. Un `REGRESSION_GUARD` adicional falla si se agrega una regla nueva a `ARCHITECTURE_RULES` sin su snippet correspondiente — cierra el hueco de forma estructural, no solo para las 6 reglas actuales.
+
+### NO_TOCAR — verificado
+
+No se modificó: `npm run quality:gate`, los 7 steps, `.github/workflows/quality-gate.yml`, `config-validate-all.ts`, ninguna ruta/middleware/repositorio/engine de producción, auth/RBAC, session lifecycle, evaluator, rate limiting, trust proxy. Único diff: `backend/src/architecture/genericEngineScan.ts` (+31 líneas) y su test (+67/-10 líneas).
+
+### ENGINE_GENERICITY — lista de reglas tras el fix
+
+1. `ENGINE_GENERICITY_CLIENT_LITERALS`
+2. `ENGINE_GENERICITY_NO_APP_USERS`
+3. `ENGINE_GENERICITY_NO_SHARED_TOKEN_IDENTITY`
+4. `ENGINE_GENERICITY_NO_LEXICOGRAPHIC_VERSION_PICK`
+5. `ENGINE_GENERICITY_NO_LITERAL_TENANT_BRANCH`
+6. **`ENGINE_GENERICITY_NO_ORG_ID_LITERAL`** (nueva)
+
+### Resultado final verificado
+
+```
+backend:  28 test files / 363 tests PASS   (+10 tests respecto al cierre inicial de Fase 9: 4 nuevos de violación/precisión + 1 REGRESSION_GUARD + 6 del loop NEGATIVE_CONTROL − 1 test viejo reemplazado)
+frontend:  2 test files /   8 tests PASS   (sin cambios)
+
+npm run quality:gate (raíz), exit 0:
+[PASS] backend tests (4201ms)
+[PASS] backend build (1028ms)
+[PASS] backend scripts typecheck (982ms)
+[PASS] frontend tests (446ms)
+[PASS] frontend build (1334ms)
+[PASS] config package validation (all) (284ms)
+[PASS] generic engine architecture scan (225ms)
+
+QUALITY GATE: PASS (7/7 steps)
+
+architecture:scan standalone contra el repo real: 0 violaciones.
+```
+
+### Commits
+
+- `3c4c270` — fix (P1 + P2), código + tests
+- (SHA de este addendum: ver el commit "Doc: PASS_WITH_FIXES_ADDENDUM ronda 1" inmediatamente posterior)
+
+P0 = 0, P1 = 0 tras el fix. No deploy. No Firestore real. No Fase 10.
