@@ -3,8 +3,18 @@ import cors from "cors";
 import { config } from "./config.js";
 import { router } from "./routes.js";
 import { initFirebase } from "./firebase.js";
+import { TRUSTED_PROXY_HOPS } from "./trustProxy.js";
 
 const app = express();
+
+// Fase 8 PASS_WITH_FIXES (P1): without this, Express ignores
+// X-Forwarded-For entirely and req.ip is always Caddy's own container
+// address for every request — collapsing ipScopedLimiter's per-client
+// bucket (middleware/rateLimit.ts, routes.ts) into ONE shared bucket for
+// all traffic through the proxy. See trustProxy.ts for the full grounding
+// (deployment topology, the exact condition under which this process
+// receives traffic, and why a client can't spoof this).
+app.set("trust proxy", TRUSTED_PROXY_HOPS);
 
 app.use(
   cors({
