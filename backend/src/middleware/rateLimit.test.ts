@@ -11,13 +11,13 @@ vi.mock("../observability/log.js", () => ({
   elapsedMs: (start: number) => Date.now() - start,
 }));
 
-const { scopedRateLimit, userScopedLimiter, organizationScopedLimiter, globalScopedLimiter } = await import(
-  "./rateLimit.js"
-);
+const { scopedRateLimit, userScopedLimiter, organizationScopedLimiter, globalScopedLimiter, ipScopedLimiter } =
+  await import("./rateLimit.js");
 
 function fakeReq(overrides: Partial<Request> = {}): Request {
   return {
     path: "/session/start",
+    ip: "203.0.113.5",
     auth: { uid: "uid-1", email: null },
     appContext: { userId: "uid-1", email: null, organizationId: "org-1", role: "SPOKESPERSON" },
     id: "req-1",
@@ -254,5 +254,80 @@ describe("userScopedLimiter / globalScopedLimiter — factory wiring", () => {
     const res2 = fakeRes();
     mw(fakeReq({ auth: { uid: "uid-b", email: null } }), res2, next);
     expect(res2.status).toHaveBeenCalledWith(429);
+  });
+});
+
+// PASS_WITH_FIXES P1.1: the pre-auth, IP-scoped safety cap. Unlike
+// user/organization/global limiters, this one is a SINGLE middleware
+// instance shared across every route (mounted before requireAuth even
+// runs), so its `endpoint` for logging purposes must be resolved PER
+// REQUEST (req.path), not fixed at creation time like the other
+// factories' single-literal `endpoint` argument.
+describe("ipScopedLimiter", () => {
+  it("keys on req.ip, never on req.auth.uid or req.appContext — works identically pre-auth", () => {
+    const storeId = freshStoreId();
+    const mw = ipScopedLimiter({ windowMs: 60_000, limit: 1 }, storeId);
+    const next = vi.fn();
+    // No auth/appContext at all — this limiter must still function
+    // (pre-auth is exactly where it's meant to run).
+    mw({ path: "/session/start", ip: "203.0.113.5", id: "req-1" } as unknown as Request, fakeRes(), next);
+    const res2 = fakeRes();
+    mw({ path: "/session/start", ip: "203.0.113.5", id: "req-2" } as unknown as Request, res2, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(res2.status).toHaveBeenCalledWith(429);
+  });
+
+  it("different source IPs get independent buckets", () => {
+    const storeId = freshStoreId();
+    const mw = ipScopedLimiter({ windowMs: 60_000, limit: 1 }, storeId);
+    const next = vi.fn();
+    mw({ path: "/session/start", ip: "203.0.113.5", id: "req-1" } as unknown as Request, fakeRes(), next);
+    const res2 = fakeRes();
+    mw({ path: "/session/start", ip: "198.51.100.9", id: "req-2" } as unknown as Request, res2, next);
+
+    expect(next).toHaveBeenCalledTimes(2);
+    expect(res2.status).not.toHaveBeenCalled();
+  });
+
+  it("many DIFFERENT users sharing the SAME IP are not blocked prematurely by a low per-user identity — they share the IP bucket, but each still gets counted fairly against the SAME cap, not a lower one per identity", () => {
+    const storeId = freshStoreId();
+    const mw = ipScopedLimiter({ windowMs: 60_000, limit: 3 }, storeId);
+    const next = vi.fn();
+    for (const uid of ["uid-a", "uid-b", "uid-c"]) {
+      mw(fakeReq({ ip: "203.0.113.5", auth: { uid, email: null } }), fakeRes(), next);
+    }
+    expect(next).toHaveBeenCalledTimes(3); // exactly at the cap, none rejected
+  });
+
+  it("logs rate_limit_scope: 'ip' on rejection, with the request's actual path as endpoint, and never the raw IP", () => {
+    const storeId = freshStoreId();
+    const mw = ipScopedLimiter({ windowMs: 60_000, limit: 1 }, storeId);
+    const next = vi.fn();
+    mw({ path: "/metrics/analyze", ip: "203.0.113.5", id: "req-1" } as unknown as Request, fakeRes(), next);
+    mw({ path: "/metrics/analyze", ip: "203.0.113.5", id: "req-2" } as unknown as Request, fakeRes(), next);
+
+    expect(logEvent).toHaveBeenCalledTimes(1);
+    const logged = logEvent.mock.calls[0][0];
+    expect(logged).toMatchObject({
+      event: "rate_limit_rejected",
+      request_id: "req-2",
+      endpoint: "/metrics/analyze",
+      rate_limit_scope: "ip",
+      outcome: "failure",
+    });
+    expect(JSON.stringify(logged)).not.toContain("203.0.113.5");
+  });
+
+  it("omits user_id/organization_id when rejecting a genuinely pre-auth request", () => {
+    const storeId = freshStoreId();
+    const mw = ipScopedLimiter({ windowMs: 60_000, limit: 1 }, storeId);
+    const next = vi.fn();
+    mw({ path: "/session/start", ip: "203.0.113.5", id: "req-1" } as unknown as Request, fakeRes(), next);
+    mw({ path: "/session/start", ip: "203.0.113.5", id: "req-2" } as unknown as Request, fakeRes(), next);
+
+    const logged = logEvent.mock.calls[0][0];
+    expect("user_id" in logged).toBe(false);
+    expect("organization_id" in logged).toBe(false);
   });
 });

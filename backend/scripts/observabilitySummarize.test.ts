@@ -65,7 +65,12 @@ describe("summarize", () => {
     expect(result.evaluations).toEqual({ success: 2, failure: 1 });
   });
 
-  it("computes p50/p95/max latency per endpoint", () => {
+  // PASS_WITH_FIXES P1.2: nearest-rank is rank = ceil(p * n), 1-indexed,
+  // converted to a 0-indexed array position (rank - 1) — NOT
+  // floor(p * (n - 1)), which the report claimed to use but didn't. For
+  // n=10, p95: ceil(0.95 * 10) = 10 -> index 9 -> the LAST (highest)
+  // value, not the 9th of 10.
+  it("computes p50/p95/max latency per endpoint using nearest-rank", () => {
     const durations = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
     const lines = durations.map((d) =>
       line({ event: "http_request", endpoint: "/session/end", status_code: 200, outcome: "success", duration_ms: d })
@@ -74,9 +79,30 @@ describe("summarize", () => {
     const stats = result.latency_by_endpoint["/session/end"];
     expect(stats.count).toBe(10);
     expect(stats.max).toBe(100);
-    // nearest-rank on a sorted 10-element array: p50 -> index 4 (value 50), p95 -> index 8 (value 90)
+    // nearest-rank, n=10: p50 -> rank ceil(5)=5 -> index 4 -> 50; p95 -> rank ceil(9.5)=10 -> index 9 -> 100
     expect(stats.p50).toBe(50);
-    expect(stats.p95).toBe(90);
+    expect(stats.p95).toBe(100);
+  });
+
+  it("nearest-rank with a single value returns that value for every percentile", () => {
+    const lines = [line({ event: "http_request", endpoint: "/me", status_code: 200, outcome: "success", duration_ms: 42 })];
+    const result = summarize(lines);
+    const stats = result.latency_by_endpoint["/me"];
+    expect(stats.p50).toBe(42);
+    expect(stats.p95).toBe(42);
+    expect(stats.max).toBe(42);
+  });
+
+  it("nearest-rank with two values: documents the exact rank chosen for p50 and p95", () => {
+    const lines = [10, 20].map((d) =>
+      line({ event: "http_request", endpoint: "/me", status_code: 200, outcome: "success", duration_ms: d })
+    );
+    const result = summarize(lines);
+    const stats = result.latency_by_endpoint["/me"];
+    // n=2: p50 -> rank ceil(1)=1 -> index 0 -> 10; p95 -> rank ceil(1.9)=2 -> index 1 -> 20
+    expect(stats.p50).toBe(10);
+    expect(stats.p95).toBe(20);
+    expect(stats.max).toBe(20);
   });
 
   it("computes latency per provider and per event independently", () => {
@@ -120,6 +146,25 @@ describe("summarize", () => {
     expect(() => summarize(lines)).not.toThrow();
     const result = summarize(lines);
     expect(result.request_count).toBe(1);
+  });
+
+  // PASS_WITH_FIXES P2: an http_request with no `outcome` field used to
+  // fall into the `else` branch of `outcome === "failure" ? error :
+  // success`, silently counting as a success. It must count as neither.
+  it("an http_request with no outcome field counts toward request_count but NOT success_count or error_count", () => {
+    const lines = [line({ event: "http_request", endpoint: "/me" })];
+    const result = summarize(lines);
+    expect(result.request_count).toBe(1);
+    expect(result.success_count).toBe(0);
+    expect(result.error_count).toBe(0);
+  });
+
+  it("an http_request with an unrecognized outcome value (neither success nor failure) is also neither", () => {
+    const lines = [line({ event: "http_request", endpoint: "/me", outcome: "retry" })];
+    const result = summarize(lines);
+    expect(result.request_count).toBe(1);
+    expect(result.success_count).toBe(0);
+    expect(result.error_count).toBe(0);
   });
 
   it("does not crash on a line that's valid JSON but not an object (e.g. a bare number or array)", () => {

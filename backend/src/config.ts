@@ -87,6 +87,19 @@ export const config = {
     metricsAnalyze: {
       user: { windowMs: 60_000, limit: envInt("RATE_LIMIT_METRICS_ANALYZE_USER_PER_MIN", 30) },
     },
+    // PASS_WITH_FIXES P1.1: pre-auth, IP-scoped safety cap — replaces the
+    // old express-rate-limit-based 20/min-per-IP limiter, which sat
+    // BEFORE every tenant-aware limit and was actually lower than
+    // sessionStart.organization's 30/min, making it the real bottleneck
+    // for a legitimate multi-user client behind a shared NAT instead of
+    // the safety net it was meant to be. 300/min is deliberately well
+    // above every per-endpoint organization limit above (30 for
+    // /session/start, 20 for /session/end) so a real shared-NAT tenant
+    // with several concurrent users never hits this before their own
+    // organization limit would kick in — it exists to stop a genuine
+    // flood, not to police normal shared-office traffic. Still a
+    // conservative estimate, not load-tested.
+    ipSafetyCap: { windowMs: 60_000, limit: envInt("RATE_LIMIT_IP_SAFETY_CAP_PER_MIN", 300) },
   },
 
   // AUTH_ALLOWED_EMAILS (the Phase 1 temporary allowlist) was retired in

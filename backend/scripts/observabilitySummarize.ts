@@ -36,9 +36,18 @@ export interface SummaryResult {
 // technique as a load-test summary: p50/p95 pick the value at the
 // corresponding rank, no interpolation — simple and defensible for an
 // offline CLI tool, not a claim of statistical rigor.
+//
+// PASS_WITH_FIXES P1.2: rank = ceil(p * n), 1-indexed, converted to a
+// 0-indexed array position (rank - 1). This is the textbook nearest-rank
+// definition — the previous `floor(p * (n - 1))` was NOT nearest-rank
+// despite the comment claiming it was: for n=10, p95, it picked index 8
+// (the 9th of 10 values, i.e. p90) instead of index 9 (the actual
+// highest-ranked 95th-percentile value for 10 samples).
 function percentile(sorted: number[], p: number): number {
-  if (sorted.length === 0) return 0;
-  const idx = Math.min(sorted.length - 1, Math.floor(p * (sorted.length - 1)));
+  const n = sorted.length;
+  if (n === 0) return 0;
+  const rank = Math.ceil(p * n);
+  const idx = Math.min(n - 1, Math.max(0, rank - 1));
   return sorted[idx];
 }
 
@@ -118,8 +127,12 @@ export function summarize(lines: string[]): SummaryResult {
     switch (event) {
       case "http_request": {
         request_count++;
+        // PASS_WITH_FIXES P2: only an EXPLICIT "success"/"failure"
+        // counts — a missing or unrecognized outcome is neither. The old
+        // `else success_count++` silently treated absent/malformed data
+        // as a success, which would understate a real error rate.
         if (outcome === "failure") error_count++;
-        else success_count++;
+        else if (outcome === "success") success_count++;
         if (endpoint) increment(requests_by_endpoint, endpoint);
         if (organizationId) increment(organization_traffic, organizationId);
         break;

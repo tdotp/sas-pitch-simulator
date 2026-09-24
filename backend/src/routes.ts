@@ -8,7 +8,6 @@
 // PHASE_03_TENANT_ISOLATION_RBAC_REPORT.md.
 
 import { Router, type Request, type Response, type NextFunction } from "express";
-import rateLimit from "express-rate-limit";
 import { randomUUID } from "node:crypto";
 import { assertElevenReady, assertOpenRouterReady, config } from "./config.js";
 import { requireAuth } from "./middleware/auth.js";
@@ -36,7 +35,12 @@ import {
 import { logEvent, elapsedMs } from "./observability/log.js";
 import { requestId } from "./middleware/requestId.js";
 import { requestLogging } from "./middleware/requestLogging.js";
-import { userScopedLimiter, organizationScopedLimiter, globalScopedLimiter } from "./middleware/rateLimit.js";
+import {
+  userScopedLimiter,
+  organizationScopedLimiter,
+  globalScopedLimiter,
+  ipScopedLimiter,
+} from "./middleware/rateLimit.js";
 
 export const router = Router();
 
@@ -89,15 +93,26 @@ function requireToken(req: Request, res: Response, next: NextFunction) {
   res.status(401).json({ error: "No autorizado" });
 }
 
-const limiter = rateLimit({
-  windowMs: 60_000,
-  limit: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Demasiadas solicitudes. Intenta de nuevo en un minuto." },
-});
-
-router.use(requireToken, limiter);
+// PASS_WITH_FIXES P1.1: this used to be express-rate-limit's own
+// IP-based limiter at 20 req/min — BEFORE auth, so it counted every
+// request from a shared IP into ONE bucket regardless of who was making
+// it. A handful of legitimate users behind the same corporate NAT could
+// collectively exhaust it well before any of them individually came
+// close to their own per-user/per-organization budget — and at 20/min it
+// was already LOWER than /session/start's organization limit (30/min),
+// so it was the actual bottleneck, not the tenant-aware limits it was
+// supposed to sit behind. Replaced with the same scoped primitive the
+// tenant-aware limiters use (ipScopedLimiter, keyed on req.ip, never
+// req.auth/req.appContext — this must keep working for requests that
+// haven't authenticated yet), with a default (see
+// config.rateLimits.ipSafetyCap) deliberately well above every
+// per-endpoint organization limit so it acts purely as a pre-auth safety
+// ceiling, not the primary control — see RATE_LIMIT_KEY_STRATEGY in
+// PHASE_08_OBSERVABILITY_RATE_LIMITS_REPORT.md's PASS_WITH_FIXES
+// addendum. Still mounted before requireAuth: this is exactly the
+// AUTH_ROUTES/PRE-AUTH_LIMITING case, a basic defense for routes where no
+// uid/organization exists yet.
+router.use(requireToken, ipScopedLimiter(config.rateLimits.ipSafetyCap));
 
 // ── FAST LANE ─────────────────────────────────────────────
 //

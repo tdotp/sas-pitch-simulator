@@ -57,11 +57,17 @@ export interface ScopedRateLimitOptions {
   // Unique per limiter instance — see the stores comment above.
   storeId: string;
   scope: RateLimitScope;
-  // For logging only (which route this limiter guards) — every current
-  // call site passes a fixed literal, not something derived from the
-  // request, so cardinality stays bounded (see NO_HIGH_CARDINALITY in the
-  // Fase 8 report).
-  endpoint: string;
+  // For logging only (which route this limiter guards). Every
+  // user/organization/global call site passes a fixed literal (cardinality
+  // stays bounded — see NO_HIGH_CARDINALITY in the Fase 8 report). The
+  // `ip` scope is the one exception: PASS_WITH_FIXES P1.1 replaced the
+  // single-endpoint-per-instance legacy limiter with ONE shared
+  // pre-auth middleware mounted across every route, so its endpoint for
+  // logging must be resolved PER REQUEST (req.path) rather than fixed at
+  // creation time — still bounded cardinality, since the actual set of
+  // routes is small and static, just not knowable at limiter-creation
+  // time the way a single-route limiter's is.
+  endpoint: string | ((req: Request) => string);
   // Returns the bucket key, or null to skip this limiter entirely (e.g. a
   // route where the relevant scope — user, org — isn't resolved yet).
   keyOf: (req: Request) => string | null;
@@ -103,9 +109,16 @@ export function scopedRateLimit(opts: ScopedRateLimitOptions) {
       logEvent({
         event: "rate_limit_rejected",
         request_id: req.id,
-        user_id: req.auth?.uid,
-        organization_id: req.appContext?.organizationId,
-        endpoint: opts.endpoint,
+        // Fase 8 P1.1: only spread when actually resolved — a bare
+        // `user_id: req.auth?.uid` would still put the key on the object
+        // (with value undefined) even for a genuinely pre-auth request
+        // (the ip scope's whole point). JSON.stringify would drop it in
+        // the real logEvent either way, but this keeps the in-memory
+        // object itself honest too, and is what the ipScopedLimiter
+        // tests assert on directly.
+        ...(req.auth?.uid ? { user_id: req.auth.uid } : {}),
+        ...(req.appContext?.organizationId ? { organization_id: req.appContext.organizationId } : {}),
+        endpoint: typeof opts.endpoint === "function" ? opts.endpoint(req) : opts.endpoint,
         rate_limit_scope: opts.scope,
         outcome: "failure",
       });
@@ -161,6 +174,28 @@ export function globalScopedLimiter(endpoint: string, cfg: RateLimitWindow) {
     scope: "global",
     endpoint,
     keyOf: () => "global",
+  });
+}
+
+// PASS_WITH_FIXES P1.1 — pre-auth IP safety cap. Replaces the old
+// express-rate-limit `limiter` in routes.ts: same PURPOSE (a basic
+// defense for routes where no uid/organization exists yet — see
+// AUTH_ROUTES/PRE-AUTH_LIMITING in the Fase 8 report), but now built on
+// the same primitive as the tenant-aware limiters, so a rejection gets
+// the SAME structured rate_limit_rejected logging instead of
+// express-rate-limit's own response shape. Deliberately generous (see
+// config.rateLimits.ipSafetyCap's default and comment) — this must be a
+// safety ceiling, never the layer that actually enforces per-tenant
+// fairness; the user/organization limiters do that job. `storeId` is
+// overridable (tests only) since production mounts exactly ONE instance
+// of this at the router root, but tests need fresh, isolated instances.
+export function ipScopedLimiter(cfg: RateLimitWindow, storeId = "ip:global") {
+  return scopedRateLimit({
+    storeId,
+    cfg,
+    scope: "ip",
+    endpoint: (req) => req.path,
+    keyOf: (req) => (req.ip ? `ip:${req.ip}` : null),
   });
 }
 

@@ -7,15 +7,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import request from "supertest";
 
-// This file's route coverage now sends well over 20 requests through the
-// SAME router (and therefore the same rate-limiter instance/store) — the
-// module-level 20-req/min limiter in routes.ts isn't what these tests are
-// about, so it's neutralized here to avoid spurious 429s unrelated to
-// auth/RBAC/tenant-isolation behavior.
-vi.mock("express-rate-limit", () => ({
-  default: () => (_req: unknown, _res: unknown, next: () => void) => next(),
-}));
-
 const verifyIdTokenMock = vi.fn();
 
 vi.mock("firebase-admin", () => ({
@@ -47,6 +38,11 @@ vi.mock("./config.js", () => ({
       metricsAnalyze: {
         user: { windowMs: 60_000, limit: 1000 },
       },
+      // PASS_WITH_FIXES P1.1: this now runs on EVERY request through this
+      // router (it replaced the old express-rate-limit mock that used to
+      // neutralize the module-level 20/min IP limiter here) — needs to be
+      // generous for the same reason the tenant-aware defaults above are.
+      ipSafetyCap: { windowMs: 60_000, limit: 1000 },
     },
   },
   assertElevenReady: () => null,
@@ -1800,6 +1796,7 @@ describe("Fase 8: rate limiting wiring", () => {
     mockedConfig.rateLimits.sessionEnd.organization.limit = defaultRateLimits.sessionEnd.organization.limit;
     mockedConfig.rateLimits.sessionEnd.global.limit = defaultRateLimits.sessionEnd.global.limit;
     mockedConfig.rateLimits.metricsAnalyze.user.limit = defaultRateLimits.metricsAnalyze.user.limit;
+    mockedConfig.rateLimits.ipSafetyCap.limit = defaultRateLimits.ipSafetyCap.limit;
   });
 
   it("the same user exceeding the user limit on /session/start gets 429 with Retry-After", async () => {
@@ -1927,5 +1924,58 @@ describe("Fase 8: rate limiting wiring", () => {
     asSingleOrgUser("uid-b", "org-b", "SPOKESPERSON"); // different user AND org
     const resB = await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
     expect(resB.status).toBe(429); // global safety cap, independent of user/org
+  });
+
+  // PASS_WITH_FIXES P1.1: real shared-NAT evidence — several distinct
+  // users (different uid, different org — supertest requests from this
+  // process all share the SAME source IP, exactly like a real shared
+  // NAT) must NOT be blocked by the pre-auth IP layer before reaching
+  // their own user/organization limits. User and organization limits are
+  // set tight (1) here specifically so IF the IP layer were still the
+  // dominant, lower bound (the old bug), these requests would already be
+  // failing for the WRONG reason before this test could even isolate
+  // user/org behavior.
+  it("SHARED_NAT_EVIDENCE: several distinct users behind the same IP each reach their OWN user/organization limit, unblocked by the IP layer", async () => {
+    mockedConfig.rateLimits.sessionStart.user.limit = 1;
+    mockedConfig.rateLimits.sessionStart.organization.limit = 1;
+    const app = buildApp();
+    for (const [uid, org] of [
+      ["uid-nat-a", "org-nat-a"],
+      ["uid-nat-b", "org-nat-b"],
+      ["uid-nat-c", "org-nat-c"],
+      ["uid-nat-d", "org-nat-d"],
+      ["uid-nat-e", "org-nat-e"],
+    ]) {
+      asSingleOrgUser(uid, org, "SPOKESPERSON");
+      const res = await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
+      expect(res.status).toBe(200); // none blocked by a shared IP bucket
+    }
+  });
+
+  it("PRE_AUTH IP layer: once its own (deliberately low, test-only) cap is exceeded, rejects with 429, a rate_limit_rejected event, and rate_limit_scope 'ip'", async () => {
+    mockedConfig.rateLimits.ipSafetyCap.limit = 2;
+    const app = buildApp();
+
+    // Three DIFFERENT users, so user/organization limits (generous here)
+    // never come close — isolates the IP layer specifically.
+    for (const [uid, org] of [
+      ["uid-ip-a", "org-ip-a"],
+      ["uid-ip-b", "org-ip-b"],
+    ]) {
+      asSingleOrgUser(uid, org, "SPOKESPERSON");
+      const res = await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
+      expect(res.status).toBe(200);
+    }
+
+    asSingleOrgUser("uid-ip-c", "org-ip-c", "SPOKESPERSON");
+    const res3 = await request(app).post("/api/session/start").set("Authorization", "Bearer t1").send({ target_mode: "generic" });
+    expect(res3.status).toBe(429);
+    expect(res3.body).toMatchObject({ retry_after_seconds: expect.any(Number) });
+
+    const rejections = logEventMock.mock.calls.map((c) => c[0]).filter((f) => f.event === "rate_limit_rejected");
+    const ipRejection = rejections.find((r) => r.rate_limit_scope === "ip");
+    expect(ipRejection).toBeDefined();
+    expect(ipRejection).toMatchObject({ rate_limit_scope: "ip", outcome: "failure", endpoint: "/session/start" });
+    expect(typeof ipRejection.request_id).toBe("string");
   });
 });
