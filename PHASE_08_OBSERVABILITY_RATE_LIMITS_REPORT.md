@@ -283,3 +283,57 @@ Ninguno bloqueante para cerrar Fase 8.
 15. **Deuda explícita para Fase 9:** ver `DEFERRED_TO_PHASE_09`.
 
 **No deploy. No Firestore real. No Fase 9.**
+
+---
+
+## PASS_WITH_FIXES_ADDENDUM
+
+Revisión técnica: `PASS_WITH_FIXES`. Arquitectura de observabilidad + rate limiting aprobada — request_id, buckets tenant-aware, summarizer, lifecycle, auth, multitenancy y provider logic quedan intactos. 2 P1 + 1 P2 cerrados.
+
+**Commit del fix:** `0318eded1fcdbc9bf4c817b82ecf896a7014d698`
+
+### P1.1 — el limiter IP legacy seguía dominando
+
+**Diagnóstico confirmado:** `router.use(requireToken, limiter)` seguía usando `express-rate-limit` puro, 20 req/min por IP, ANTES de `requireAuth`/`requireMembership` y antes de los buckets user/org/global nuevos. 20/min es literalmente MENOR que el límite de organización de `/session/start` (30/min) — la capa que debía ser un techo de seguridad pre-auth era, en la práctica, el límite real que importaba, y podía bloquear colectivamente a varios usuarios legítimos detrás del mismo NAT antes de que sus propios límites user/org entraran en juego.
+
+**Decisión final sobre la capa IP:** se mantiene (no se retira) — sigue cumpliendo su función original de defensa pre-auth (AUTH_ROUTES/PRE-AUTH_LIMITING, punto 19 de Fase 8) para rutas donde todavía no existe uid/organización. Se reconstruyó sobre el MISMO primitivo (`scopedRateLimit`) que ya usan los limiters tenant-aware, en vez de mantener una segunda implementación (`express-rate-limit`) con su propia forma de responder. Nueva función `ipScopedLimiter` ([middleware/rateLimit.ts](backend/src/middleware/rateLimit.ts)), keyed en `req.ip` (nunca `req.auth`/`req.appContext`, que ni siquiera existen todavía en este punto del middleware chain). Default: **300 req/min** (`config.rateLimits.ipSafetyCap`, env `RATE_LIMIT_IP_SAFETY_CAP_PER_MIN`) — deliberadamente por encima de TODO límite de organización/usuario existente (30 y 20 para organización en `/session/start`/`/session/end`), verificado con un test de invariante contra la config real por defecto (`config.test.ts`), no solo contra un mock. Sigue siendo una estimación conservadora, no un dato de carga real — mismo estándar que el resto de límites de Fase 8.
+
+**Cambio técnico de soporte:** `scopedRateLimit`'s `endpoint` ahora acepta `string | ((req) => string)` — esta capa es UNA sola instancia compartida por todas las rutas (a diferencia de user/org/global, que tienen una instancia por endpoint), así que el `endpoint` que aparece en el log de rechazo se resuelve por request (`req.path`) en vez de fijarse en la creación.
+
+**Logging obligatorio:** todo rechazo de esta capa emite `rate_limit_rejected` con `request_id`, `endpoint` (la ruta real del request), `rate_limit_scope: "ip"`, `outcome: "failure"` — `user_id`/`organization_id` solo si ya existían (nunca en un rechazo genuinamente pre-auth, verificado por test). La IP cruda nunca se loguea — ni como campo (`LogFields` no tiene uno) ni embebida en ningún otro valor (verificado por test que confirma que el string de la IP nunca aparece en el JSON logueado).
+
+**Nueva evidencia de shared-NAT behavior** (`routes.test.ts`, contra la ruta real, no el primitivo aislado):
+- `SHARED_NAT_EVIDENCE`: 5 usuarios distintos (uid y organización distintos cada uno) detrás de la MISMA IP de origen (todas las requests de supertest en este proceso comparten IP, igual que un NAT real), cada uno con su propio límite user/org deliberadamente bajado a 1 — los 5 reciben 200, ninguno bloqueado por la capa IP.
+- `PRE_AUTH IP layer`: con el cap de IP bajado deliberadamente a 2 (solo para este test) y límites user/org generosos (para aislar la capa IP específicamente), 3 usuarios distintos → los primeros 2 pasan, el 3º recibe 429 con `rate_limit_scope: "ip"` (nunca "user" ni "organization") y un `rate_limit_rejected` con `request_id` presente.
+
+### P1.2 — cálculo de p95 corregido a nearest-rank real
+
+El código decía usar nearest-rank pero calculaba `Math.floor(p * (n - 1))`. Para 10 valores `[10..100]`, eso da índice 8 → **90** (el 9º de 10, es decir p90, no p95). Nearest-rank real es `rank = ceil(p * n)`, convertido a índice 0-based (`rank - 1`): para n=10, p95 → `ceil(9.5) = 10` → índice 9 → **100** (el valor más alto).
+
+**Ejemplo corregido** (mismo fixture del reporte original, `[10,20,...,100]`):
+```json
+{ "p50": 50, "p95": 100, "max": 100 }
+```
+(antes: `{ "p50": 50, "p95": 90, "max": 100 }` — p50 no cambió, coincide con la fórmula vieja en este dataset por casualidad; p95 sí).
+
+Tests nuevos: `[10..100]` (p50=50, p95=100, ya corregido arriba), 1 valor (p50=p95=max=ese valor), 2 valores (`[10,20]`: p50→rank ceil(1)=1→índice 0→10; p95→rank ceil(1.9)=2→índice 1→20 — comportamiento documentado y testeado explícitamente, no dejado implícito).
+
+### P2 — outcome ausente ya no cuenta como éxito
+
+`case "http_request": if (outcome === "failure") error_count++; else success_count++;` trataba CUALQUIER outcome que no fuera `"failure"` (incluyendo ausente, `null`, o un valor no reconocido) como éxito. Corregido a comparación explícita en ambos sentidos: `outcome === "failure"` → error, `outcome === "success"` → éxito, cualquier otra cosa → ninguno de los dos (sigue sumando a `request_count`, ya que estructuralmente es un `http_request` válido). Tests nuevos: `{event:"http_request"}` sin `outcome` → `request_count:1, success_count:0, error_count:0`; `outcome:"retry"` (valor reconocido por `LogFields` pero no aplicable aquí) → mismo resultado.
+
+### TEST_RESULTS (tras el fix)
+
+```
+backend:  23 archivos, 329 tests, PASS  (316 -> 329: +13 de este addendum, verificado 3 corridas consecutivas)
+frontend:  2 archivos,   8 tests, PASS (sin cambios)
+```
+
+### BUILD_RESULTS (tras el fix)
+
+```
+backend  tsc -p tsconfig.json          → PASS
+frontend tsc -b && vite build          → PASS
+```
+
+No deploy. No Firestore real. No Fase 9.
