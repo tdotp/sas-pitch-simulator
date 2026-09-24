@@ -39,6 +39,14 @@ const SELF: { file: string; reason: string } = {
     "This file defines the ENGINE_GENERICITY rules themselves — the pattern source and rule id/description strings are data describing what to detect, not application code exhibiting the violation.",
 };
 
+// PASS_WITH_FIXES ronda 1, P1: the real organizationIds actually
+// committed under backend/config-packages/ today. Kept as an explicit,
+// static, reviewable list (not derived from the filesystem at rule
+// definition time) — "sin AST complejo", per the review. Extend this
+// list, with a comment saying why, the day a new client org is onboarded
+// and its id needs the same protection.
+const KNOWN_CLIENT_ORG_IDS = ["sas-colombia", "acme-demo"];
+
 export const ARCHITECTURE_RULES: ArchitectureRule[] = [
   {
     id: "ENGINE_GENERICITY_CLIENT_LITERALS",
@@ -84,6 +92,29 @@ export const ARCHITECTURE_RULES: ArchitectureRule[] = [
     description: "No branching on a hardcoded client/org/organizationId string literal.",
     pattern: /\b(client|org|organization|organizationId)\s*===\s*["']/,
     allow: [SELF],
+  },
+  // PASS_WITH_FIXES ronda 1, P1: ENGINE_GENERICITY_NO_LITERAL_TENANT_BRANCH
+  // only ever fires on an `=== "org-id"` COMPARISON. A hardcoded org id
+  // used any other way (a constant, an array of "supported" ids, a map
+  // key, ...) carries the exact same contamination with no branch at
+  // all, and passed through undetected. This rule matches the KNOWN,
+  // real organizationIds actually committed under config-packages/ —
+  // wherever they appear as a quoted literal in generic source — instead
+  // of trying to infer "looks like an org id" generically (which would
+  // need real parsing to avoid false positives on unrelated strings).
+  {
+    id: "ENGINE_GENERICITY_NO_ORG_ID_LITERAL",
+    description:
+      "No hardcoded literal of a known client organizationId (sas-colombia, acme-demo) anywhere in generic engine source, even outside a '===' branch.",
+    pattern: new RegExp(`["'](?:${KNOWN_CLIENT_ORG_IDS.join("|")})["']`),
+    allow: [
+      SELF,
+      {
+        file: "src/routes.ts",
+        reason:
+          'Explanatory comment (line ~125) illustrating that generic code does NOT know client names ("nothing here knows what "davivienda" or "sas-colombia" mean") — documentation, not a hardcoded reference.',
+      },
+    ],
   },
 ];
 
