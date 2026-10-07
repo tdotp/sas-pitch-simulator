@@ -1,8 +1,8 @@
-# SAS VOCERIA — CONTEXT HANDOFF / START PROMPT (post Fase 8)
+# SAS VOCERIA — CONTEXT HANDOFF / START PROMPT (post Fase 9)
 
 ## 1. ROL DEL NUEVO CHAT
 
-Actúa como **arquitecto técnico, reviewer, QA y auditor** del proyecto SAS VOCERIA. Este chat comienza con las Fases 1–8 ya aprobadas y cerradas (Fase 8 con 3 rondas de PASS_WITH_FIXES, todas cerradas).
+Actúa como **arquitecto técnico, reviewer, QA y auditor** del proyecto SAS VOCERIA. Este chat comienza con las Fases 1–8 aprobadas y cerradas, y con la Fase 9 (Tests / Quality Gate) **implementada, con una ronda de PASS_WITH_FIXES ya corregida, y pendiente de tu revisión formal**. Tu primera tarea es revisar Fase 9 (ver sección 12).
 
 Tu función **no es implementar ni commitear código**. Otro agente ejecutor hará los cambios. Tu trabajo:
 
@@ -81,27 +81,48 @@ in_progress → abandoned
 
 **Fase 8 — OBSERVABILITY + RATE LIMITS (final, 3 rondas de PASS_WITH_FIXES cerradas):** `request_id` generado 100% backend-side por request (`middleware/requestId.ts`), montado primero en el router. Evento `http_request` estructurado al terminar cada request (`middleware/requestLogging.ts`, `res.on("finish")`) — nunca loguea body/headers/Authorization/transcript (verificado por test). Rate limiting server-side tenant-aware (`middleware/rateLimit.ts`, primitivo `scopedRateLimit` in-memory) para `/session/start`, `/session/end`, `/metrics/analyze` — scopes `user` + `organization` + `global`, keys exclusivamente de `req.auth.uid`/`req.appContext.organizationId` (test de tenant-trust-boundary explícito: un `body.organization_id` spoofeado nunca afecta el bucket). Storage in-memory grounded en deployment real (proceso único, sin cluster — no Redis). Defaults (estimaciones conservadoras, no load-tested, todas overrideables por env): `/session/start` 6/30/120 (user/org/global por min), `/session/end` 4/20/80, `/metrics/analyze` 30 user-only. HTTP 429 con body genérico + `retry_after_seconds` + header `Retry-After`. Evento `rate_limit_rejected` en todo rechazo. Log normalization: eventos `config_integrity_failure` (LEGACY_CONFIG_VERSION_UNKNOWN/CONFIG_VERSION_RESOLUTION_FAILED/CONFIG_PROVENANCE_HASH_MISMATCH) y `session_recovery` (STALE_EVALUATION_TIMEOUT) añadidos junto a los `console.error` ya existentes. Observability summarizer offline (`scripts/observability-summarize.ts`, lee archivo/stdin, nunca lanza excepción, nearest-rank real `p50/p95/max` = `ceil(p*n)-1`). Error correlation: `request_id` opcional threadeado hacia `evaluatePitch`/`getSignedUrl`. **IP safety cap** (pre-auth, reemplaza el viejo limiter `express-rate-limit` que dominaba por estar por debajo de los límites de organización): `ipScopedLimiter`, default **300/min**, grounded > todo límite de organización/usuario existente. **Trust proxy:** `app.set("trust proxy", 1)` vía `TRUSTED_PROXY_HOPS` (`trustProxy.ts`), grounded en `internet → Caddy (único puerto público) → backend (solo expose)` — sin esto, `req.ip` sería siempre la IP de Caddy para todo el tráfico, colapsando el bucket de IP en uno solo compartido.
 
-## 6. BASELINE FINAL FASE 8
+## 5b. FASE 9 — TESTS / QUALITY GATE (implementada, pendiente de revisión formal)
+
+Fase 9 no agregó producto: convirtió el baseline de Fases 1–8 en un gate único, reproducible y offline.
+
+- **Comando:** `npm run quality:gate` (raíz; delega a `backend/scripts/run-quality-gate.ts`). Exit 0 = pasa, ≠0 = falla. Modo AGGREGATE (todos los steps corren aunque uno falle). Sin credenciales, sin Firestore real, sin OpenRouter/ElevenLabs.
+- **7 steps, en orden:** backend tests → backend build → backend scripts typecheck (`tsconfig.quality-gate.json`, excluye `*.test.ts`) → frontend tests → frontend build → config package validation de TODOS los paquetes (`config:validate-all`) → generic engine architecture scan (`architecture:scan`).
+- **Nunca ejecuta:** `config:activate`, `config:import` (live), `sessions:mark-abandoned`, `sessions:mark-stale-evaluating`. La lista `STEPS` en `run-quality-gate.ts` es exhaustiva.
+- **ENGINE_GENERICITY (6 reglas, regex + allowlist documentada, sin AST):** `CLIENT_LITERALS`, `NO_APP_USERS`, `NO_SHARED_TOKEN_IDENTITY`, `NO_LEXICOGRAPHIC_VERSION_PICK`, `NO_LITERAL_TENANT_BRANCH`, `NO_ORG_ID_LITERAL` (lista estática `sas-colombia`, `acme-demo`). Solo escanea `backend/src/` (nunca `config-packages/`). Cada regla tiene negative control sintético + `REGRESSION_GUARD` que falla si se agrega una regla sin snippet.
+- **Negative controls:** config validation (loader inyectado que devuelve un paquete inválido), architecture scan (strings sintéticos), orchestrator (all-pass → 0, one-fail → 1, step que lanza → fallo reportado).
+- **CI:** `.github/workflows/quality-gate.yml` (pull_request + push a master, sin secrets, sin deploy). No existía CI antes.
+- **Ronda 1 de PASS_WITH_FIXES (cerrada):** P1 = faltaba detectar literales de org/cliente fuera de branches `===` (nueva regla `NO_ORG_ID_LITERAL`); P2 = el test de "cobertura de reglas" solo comparaba listas de ids (reemplazado por loop de negative controls reales).
+- **Deuda de test explícita (no cerrada en Fase 9):** el cliente Firestore SDK nunca se mockea (repositorios probados solo vía fallback in-memory); el I/O de `main()` de scripts operativos sin testear; el typecheck del gate excluye `*.test.ts` por looseness de tipos preexistente en fixtures (~19 errores, ninguno bug de runtime); chunk de frontend de 741 kB.
+- **Reporte:** `PHASE_09_TESTS_QUALITY_GATE_REPORT.md` (raíz), con el addendum de la ronda 1 en el mismo archivo. Plan de implementación: `docs/superpowers/plans/2026-09-23-fase9-quality-gate.md`.
+
+## 6. BASELINE FINAL FASE 9
 
 ```
-backend:  24 test files / 335 tests PASS
+backend:  28 test files / 363 tests PASS
 frontend:  2 test files /   8 tests PASS
 backend build:  PASS (tsc -p tsconfig.json)
 frontend build: PASS (tsc -b && vite build)
+npm run quality:gate: PASS (7/7 steps, exit 0)
 ```
 
-Commits finales relevantes en `origin/master` (orden cronológico, todos pusheados y verificados con `git log --oneline origin/master`):
+(Baseline previo, cierre de Fase 8: backend 24/335, frontend 2/8.)
+
+Commits relevantes en `origin/master` (orden cronológico):
 
 ```
-079eda8a8ac982d1fa93bdedb015cf1ff33c7bbc  Fase 8 PASS: observability + rate limits (código)
-9d2072e73aa615ad3be209efce44f3e4f33bf5f9  Doc: PHASE_08_OBSERVABILITY_RATE_LIMITS_REPORT
-0318eded1fcdbc9bf4c817b82ecf896a7014d698  Fase 8 PASS_WITH_FIXES ronda 1: limiter IP/p95/outcome (código)
-9e5d962fb2e16f4caa64db10d0fb827c02868e8b  Doc: addendum ronda 1
-0e9d25c224078e284951832a2c046207635d16a6  Fase 8 PASS_WITH_FIXES ronda 2: trust proxy (código)  ← último fix
-416d19c1c83dd67be6ea8f8a40ce556ef5ea29bd  Doc: addendum ronda 2 (trust proxy)                    ← último addendum
+416d19c  Doc: addendum ronda 2 Fase 8 (trust proxy)                         ← cierre de Fase 8
+7471b1b  Fase 9: config package validation gate (validate-all)
+ec1929a  Fase 9: ENGINE_GENERICITY static rules (pure scan + negative controls)
+43f57a6  Fase 9: scan real del filesystem + regression guard + CLI
+b4a501e  Fase 9: orquestador puro con self-test (aggregate mode)
+2185e78  Fase 9: wire npm run quality:gate (7 steps) + typecheck de scripts
+07929d4  Fase 9: CI mínima (quality-gate.yml)
+156c285  Doc: PHASE_09_TESTS_QUALITY_GATE_REPORT
+3c4c270  Fase 9 PASS_WITH_FIXES ronda 1: P1 org-id literal + P2 negative controls   ← último fix
+beb1138  Doc: addendum ronda 1 Fase 9                                        ← último addendum
 ```
 
-Reporte completo: `PHASE_08_OBSERVABILITY_RATE_LIMITS_REPORT.md` (raíz del repo), con las 2 rondas de addendum incluidas en el mismo archivo.
+Reportes: `PHASE_08_OBSERVABILITY_RATE_LIMITS_REPORT.md` y `PHASE_09_TESTS_QUALITY_GATE_REPORT.md` (raíz del repo, cada uno con sus addenda en el mismo archivo).
 
 ## 7. RATE LIMITING FINAL
 
@@ -132,8 +153,8 @@ FUENTES → HUMAN TEMPLATE → transformación controlada → config-package
 ## 9. ROADMAP RESTANTE (no adelantar)
 
 ```
-9  Tests / Quality Gate            ← SIGUIENTE
-10 Legacy Migration
+9  Tests / Quality Gate            ← IMPLEMENTADA, pendiente de revisión formal (ver 5b y 12)
+10 Legacy Migration                ← SIGUIENTE tras cerrar la 9
 11 Role Dashboard
 12 Config Management
 13 Novo Generic Onboarding Proof
@@ -190,17 +211,26 @@ Severidad: **P0** bloquea seguridad/tenant isolation/funcionamiento. **P1** debe
 
 ```
 Fases 1–8: CLOSED / PASS
-NEXT: Fase 9 — Tests / Quality Gate
+Fase 9:    IMPLEMENTADA + ronda 1 de PASS_WITH_FIXES corregida — PENDIENTE DE REVISIÓN FORMAL
+NEXT:      revisar Fase 9; si cierra, Fase 10 — Legacy Migration (no empezarla sin instrucción explícita)
 ```
 
-No diseñes ni implementes Fase 9 todavía en este mensaje de arranque — espera instrucción explícita para definir su alcance.
+**Tu primera tarea:** revisar Fase 9 con el formato PHASE_REVIEW (sección 10), contra el código real y no contra el resumen:
+
+1. `git clone` / `git pull`, luego `npm ci && npm run quality:gate` — debe dar 7/7 PASS, exit 0, en una máquina limpia sin credenciales.
+2. Leer `PHASE_09_TESTS_QUALITY_GATE_REPORT.md` completo, incluido el addendum de la ronda 1.
+3. Verificar que los negative controls realmente pueden fallar (por ejemplo, romper temporalmente un paquete o inyectar un literal prohibido en una copia local, confirmar que el gate falla, y revertir sin commitear).
+4. Confirmar que Fase 9 no tocó código de runtime (rutas, auth/RBAC, lifecycle, evaluator, rate limits, trust proxy): `git diff 416d19c..HEAD --stat` debe mostrar solo tests/scripts/tooling/docs/CI.
+5. Evaluar la deuda declarada (Firestore SDK sin mockear, I/O de scripts operativos sin testear, typecheck sin `*.test.ts`) y decidir si es aceptable para cerrar la fase o si algún punto sube a P1/P2.
+
+No implementes ni commitees fixes por tu cuenta: si encuentras P0/P1, pídelos al agente ejecutor. No deploy, no Firestore real, no Fase 10.
 
 ---
 
-## SKILLS SUGERIDAS PARA EL AGENTE EJECUTOR (Fase 9 en adelante)
+## SKILLS SUGERIDAS PARA EL AGENTE EJECUTOR (Fase 10 en adelante)
 
-Cuando el ejecutor implemente Fase 9 ("Tests / Quality Gate"), estas skills son directamente relevantes si están disponibles en su entorno:
-- **test-driven-development** — Fase 9 es literalmente sobre tests; escribir cada test en rojo antes de implementar es el estándar que ya se siguió en Fases 7–8.
+Estas skills son relevantes si están disponibles en el entorno del ejecutor:
+- **test-driven-development** — escribir cada test en rojo antes de implementar es el estándar que ya se siguió en Fases 7–9.
 - **systematic-debugging** — para cualquier fallo de test no trivial que aparezca al endurecer el quality gate.
 - **verification-before-completion** — nunca reportar tests/build en verde sin haber corrido el comando en esa misma sesión.
 - **code-review** (o el flujo de revisión de este mismo chat) — para que el reviewer haga una segunda pasada sobre el diff real antes de dar PASS.
